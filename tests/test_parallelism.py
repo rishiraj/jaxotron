@@ -1,13 +1,12 @@
 """Every parallel layout must compute the same loss and gradients as one device."""
 import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from jaxotron.config import Config, ModelConfig, ParallelConfig, TrainConfig
+from jaxotron.data.loader import to_global_array
 from jaxotron.parallel.mesh import create_mesh
 from jaxotron.parallel.rules import batch_sharding
-from jaxotron.data.loader import to_global_array
 from jaxotron.trainer import init_model, make_context, make_grad_fn
 
 MODEL = ModelConfig(vocab_size=128, hidden_size=64, intermediate_size=128, num_hidden_layers=4,
@@ -27,12 +26,12 @@ LAYOUTS = {
 }
 
 
-def _run(layout: dict, accum: int = 1):
+def _run(layout: dict, accum: int = 1, remat: str = "full"):
     pcfg = ParallelConfig(**layout)
     dp = pcfg.data_parallel_size
     cfg = Config(parallel=pcfg, model=MODEL,
                  train=TrainConfig(global_batch_size=GBS, micro_batch_size=GBS // (dp * accum),
-                                   sequence_length=SEQ, dtype="float32", remat="full"))
+                                   sequence_length=SEQ, dtype="float32", remat=remat))
     devices = jax.devices()[: pcfg.world_size]
     cfg.validate(len(devices))
     mesh = create_mesh(pcfg, devices)
@@ -49,18 +48,22 @@ def reference():
     return _run({})
 
 
-@pytest.mark.parametrize("name", [n for n in LAYOUTS if n != "single"])
-def test_layout_matches_single_device(name, reference):
-    ref_loss, ref_grads = reference
-    loss, grads = _run(LAYOUTS[name])
-    assert np.isclose(loss, ref_loss, rtol=1e-5), (name, loss, ref_loss)
+def _assert_matches(result, reference):
+    (loss, grads), (ref_loss, ref_grads) = result, reference
+    assert np.isclose(loss, ref_loss, rtol=1e-5), (loss, ref_loss)
     for g, r in zip(jax.tree.leaves(grads), jax.tree.leaves(ref_grads)):
         np.testing.assert_allclose(g, r, rtol=2e-4, atol=2e-6)
+
+
+@pytest.mark.parametrize("name", [n for n in LAYOUTS if n != "single"])
+def test_layout_matches_single_device(name, reference):
+    _assert_matches(_run(LAYOUTS[name]), reference)
 
 
 def test_gradient_accumulation_matches(reference):
-    ref_loss, ref_grads = reference
-    loss, grads = _run(dict(dp=2, pp=2), accum=2)
-    assert np.isclose(loss, ref_loss, rtol=1e-5)
-    for g, r in zip(jax.tree.leaves(grads), jax.tree.leaves(ref_grads)):
-        np.testing.assert_allclose(g, r, rtol=2e-4, atol=2e-6)
+    _assert_matches(_run(dict(dp=2, pp=2), accum=2), reference)
+
+
+@pytest.mark.parametrize("remat", ["dots", "none"])
+def test_remat_policies_match(remat, reference):
+    _assert_matches(_run(dict(tp=2, cp=2), remat=remat), reference)

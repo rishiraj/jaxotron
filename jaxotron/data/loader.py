@@ -4,9 +4,9 @@
   larger than RAM open instantly.
 * The sample order is a pure function of (seed, step): resuming from a
   checkpoint resumes the exact same data stream, on any number of hosts.
-* Batches become *global* jax.Arrays with jax.make_array_from_callback: each
-  host only materialises the rows that its own devices need. This is what
-  makes the loader correct on multi-host GPU clusters and TPU pods.
+* Batches become *global* jax.Arrays with jax.make_array_from_callback. Each
+  host reads from disk only the rows that its own devices need, which keeps
+  the loader cheap on multi-host GPU clusters and TPU pods.
 """
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ import queue
 import threading
 from typing import Optional
 
-import numpy as np
 import jax
+import numpy as np
 from jax.sharding import NamedSharding
 
 
@@ -89,6 +89,16 @@ def batch_indices(step: int, batch_size: int, num_samples: int, perm: Optional[S
     return out
 
 
+def local_rows(batch_size: int, sharding: NamedSharding, row_len: int) -> np.ndarray:
+    """Global batch rows owned by this host's devices (all rows on a single host)."""
+    if jax.process_count() == 1:
+        return np.arange(batch_size)
+    rows = set()
+    for idx in sharding.addressable_devices_indices_map((batch_size, row_len)).values():
+        rows.update(range(*idx[0].indices(batch_size)))
+    return np.array(sorted(rows), dtype=np.int64)
+
+
 def to_global_array(batch: np.ndarray, sharding: NamedSharding) -> jax.Array:
     """Build a global jax.Array; each host only copies the shards its devices own."""
     return jax.make_array_from_callback(batch.shape, sharding, lambda idx: batch[idx])
@@ -101,6 +111,7 @@ class DataLoader:
                  seed: int = 0, start_step: int = 0, shuffle: bool = True, prefetch: int = 2):
         self.dataset, self.batch_size, self.sharding = dataset, batch_size, sharding
         self.perm = StridePermutation(len(dataset), seed) if shuffle else None
+        self.rows = local_rows(batch_size, sharding, dataset.seq_len + 1)
         self.step = start_step
         self._queue: queue.Queue = queue.Queue(maxsize=prefetch)
         self._stop = threading.Event()
@@ -108,8 +119,12 @@ class DataLoader:
         self._thread.start()
 
     def host_batch(self, step: int) -> np.ndarray:
+        """[batch_size, seq_len + 1] int32. Rows owned by other hosts are left as zeros (never read)."""
         idx = batch_indices(step, self.batch_size, len(self.dataset), self.perm)
-        return np.stack([self.dataset[int(i)] for i in idx])
+        batch = np.zeros((self.batch_size, self.dataset.seq_len + 1), np.int32)
+        for r in self.rows:
+            batch[r] = self.dataset[int(idx[r])]
+        return batch
 
     def _worker(self, step: int) -> None:
         while not self._stop.is_set():
@@ -123,6 +138,8 @@ class DataLoader:
                     break
                 except queue.Full:
                     continue
+            if isinstance(item, Exception):
+                return
             step += 1
 
     def __iter__(self):
@@ -138,3 +155,9 @@ class DataLoader:
     def close(self) -> None:
         self._stop.set()
         self._thread.join(timeout=5)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()

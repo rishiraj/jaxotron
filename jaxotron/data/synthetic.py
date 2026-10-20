@@ -31,14 +31,24 @@ def make_synthetic_tokens(num_tokens: int, vocab_size: int = 1024, seed: int = 0
     return out
 
 
+def _atomic_write(path: str, write) -> None:
+    tmp = f"{path}.tmp.{os.getpid()}"
+    write(tmp)
+    os.replace(tmp, path)  # atomic: safe if several hosts generate concurrently
+
+
 def write_synthetic_dataset(out_dir: str, train_tokens: int = 2_000_000, val_tokens: int = 100_000,
                             vocab_size: int = 1024, seed: int = 0) -> None:
+    if not 2 < vocab_size <= 2**16:
+        raise ValueError("Synthetic vocab_size must be in (2, 65536].")
     os.makedirs(out_dir, exist_ok=True)
     for name, n, s in (("train", train_tokens, seed), ("val", val_tokens, seed + 1)):
-        path = os.path.join(out_dir, f"{name}.bin")
-        tmp = f"{path}.tmp.{os.getpid()}"
-        make_synthetic_tokens(n, vocab_size, s).tofile(tmp)
-        os.replace(tmp, path)  # atomic: safe if several hosts generate concurrently
-    with open(os.path.join(out_dir, "meta.json"), "w") as f:
-        json.dump({"vocab_size": vocab_size, "dtype": "uint16", "tokenizer": None,
-                   "description": "synthetic arithmetic progressions"}, f, indent=2)
+        tokens = make_synthetic_tokens(n, vocab_size, s)
+        _atomic_write(os.path.join(out_dir, f"{name}.bin"), tokens.tofile)
+    meta = {"vocab_size": vocab_size, "dtype": "uint16", "tokenizer": None,
+            "description": "synthetic arithmetic progressions"}
+
+    def write_meta(tmp):
+        with open(tmp, "w") as f:
+            json.dump(meta, f, indent=2)
+    _atomic_write(os.path.join(out_dir, "meta.json"), write_meta)

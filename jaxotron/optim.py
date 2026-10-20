@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import jax
 import optax
-from jax.sharding import NamedSharding, PartitionSpec as P
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 
 from jaxotron.config import TrainConfig
-from jaxotron.parallel.rules import _leaf_name
+from jaxotron.parallel.rules import leaf_name
 
 
 def build_optimizer(tcfg: TrainConfig, params) -> tuple[optax.GradientTransformation, optax.Schedule]:
@@ -19,7 +20,7 @@ def build_optimizer(tcfg: TrainConfig, params) -> tuple[optax.GradientTransforma
         end_value=tcfg.learning_rate * tcfg.min_lr_ratio,
     )
     # No weight decay on normalisation gains.
-    decay_mask = jax.tree_util.tree_map_with_path(lambda path, _: not _leaf_name(path).endswith("norm"), params)
+    decay_mask = jax.tree_util.tree_map_with_path(lambda path, _: not leaf_name(path).endswith("norm"), params)
     optimizer = optax.chain(
         optax.clip_by_global_norm(tcfg.grad_clip),
         optax.adamw(schedule, b1=tcfg.beta1, b2=tcfg.beta2, eps=1e-8,

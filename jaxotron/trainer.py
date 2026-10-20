@@ -6,8 +6,9 @@ described by shardings; XLA inserts all communication.
 """
 from __future__ import annotations
 
+import math
 import time
-from typing import Callable
+from collections.abc import Callable
 
 import equinox as eqx
 import jax
@@ -19,9 +20,10 @@ from jaxotron.config import Config, ModelConfig
 from jaxotron.data.loader import DataLoader, TokenDataset, read_meta, to_global_array
 from jaxotron.models.llama import Llama, count_params, flops_per_token, forward
 from jaxotron.optim import build_optimizer, init_optimizer_state
+from jaxotron.parallel.collectives import collectives_table, count_collectives
 from jaxotron.parallel.context import ParallelContext
-from jaxotron.parallel.mesh import create_mesh
-from jaxotron.parallel.pipeline import split_microbatches
+from jaxotron.parallel.mesh import create_mesh, mesh_table
+from jaxotron.parallel.pipeline import bubble_fraction, split_microbatches
 from jaxotron.parallel.rules import batch_sharding, param_shardings
 from jaxotron.utils import MetricLogger, human, peak_flops_per_device, print0, sharding_table
 
@@ -129,7 +131,26 @@ def make_eval_step(static, ctx: ParallelContext, accum_steps: int) -> Callable:
 def _check_vocab(cfg: Config) -> None:
     meta_vocab = read_meta(cfg.data_path).get("vocab_size")
     if meta_vocab and meta_vocab > cfg.model.vocab_size:
-        raise ValueError(f"Dataset vocab ({meta_vocab}) exceeds model vocab_size ({cfg.model.vocab_size}).")
+        raise ValueError(f"Dataset vocab ({meta_vocab}) exceeds model vocab_size ({cfg.model.vocab_size}). "
+                         "Tokenise the data with the model's tokenizer (prepare_data.py --tokenizer ...).")
+
+
+def _print_header(cfg: Config, mesh, ctx: ParallelContext, accum: int) -> None:
+    t, p = cfg.train, cfg.parallel
+    print0(f"Jaxotron | jax {jax.__version__} | backend={jax.default_backend()} | devices={jax.device_count()} "
+           f"({jax.devices()[0].device_kind}) | processes={jax.process_count()}")
+    print0(f"Mesh: {dict(mesh.shape)}  ->  {p.describe()}")
+    source = f"from {cfg.init_from_hf}" if cfg.init_from_hf else "from scratch"
+    print0(f"Model: {human(count_params(cfg.model))} params ({source}) | compute dtype={jnp.dtype(ctx.dtype).name} "
+           f"| remat={t.remat}")
+    print0(f"Batch: global={t.global_batch_size} x {t.sequence_length} tokens | micro/replica={t.micro_batch_size} "
+           f"| grad accumulation={accum} | pipeline microbatches={cfg.pp_microbatches}")
+    if p.pp > 1:
+        print0(f"Pipeline bubble: {bubble_fraction(p.pp, cfg.pp_microbatches):.0%} of pipeline time is idle "
+               f"(raise micro_batch_size / --pp_microbatches to shrink it)")
+        if p.fsdp > 1:
+            print0("Note: with pp > 1, prefer dp over fsdp. FSDP re-gathers weights for every pipeline "
+                   "microbatch, and XLA may insert extra resharding (results stay correct, just slower).")
 
 
 def train(cfg: Config) -> dict:
@@ -142,47 +163,48 @@ def train(cfg: Config) -> dict:
     mesh = create_mesh(p)
     ctx = make_context(cfg, mesh)
     accum = cfg.grad_accum_steps
-
-    print0(f"Jaxotron | backend={jax.default_backend()} | devices={jax.device_count()} "
-           f"({jax.devices()[0].device_kind}) | processes={jax.process_count()}")
-    print0(f"Mesh: {dict(mesh.shape)}")
-    print0(f"Model: {human(count_params(cfg.model))} params | compute dtype={jnp.dtype(ctx.dtype).name} "
-           f"| remat={t.remat}")
-    print0(f"Batch: global={t.global_batch_size} x {t.sequence_length} tokens | micro/replica={t.micro_batch_size} "
-           f"| grad accumulation={accum} | pipeline microbatches={cfg.pp_microbatches}")
-    if p.pp > 1:
-        bubble = (p.pp - 1) / (cfg.pp_microbatches + p.pp - 1)
-        print0(f"Pipeline bubble: {bubble:.0%} of pipeline time is idle (raise micro_batch_size to shrink it)")
-        if p.fsdp > 1:
-            print0("Note: with pp > 1, prefer dp over fsdp. FSDP re-gathers weights for every pipeline "
-                   "microbatch, and XLA may insert extra resharding (results stay correct, just slower).")
+    _print_header(cfg, mesh, ctx, accum)
+    if cfg.show_mesh:
+        print0(mesh_table(mesh))
 
     # ---- model & optimizer (created directly in sharded form) ---------------
-    params, static, p_shardings = init_model(cfg.model, mesh, jax.random.PRNGKey(t.seed))
+    ckpt = Checkpointer(cfg.checkpoint_dir, t.keep_checkpoints)
+    if cfg.init_from_hf and ckpt.latest_step() is None:
+        from jaxotron.hf import load_hf_llama
+        _, static, p_shardings = abstract_model(cfg.model, mesh)
+        params, _ = load_hf_llama(cfg.init_from_hf, mesh, cfg.model)
+        print0(f"Loaded pretrained weights from {cfg.init_from_hf}")
+    else:
+        params, static, p_shardings = init_model(cfg.model, mesh, jax.random.PRNGKey(t.seed))
     optimizer, schedule = build_optimizer(t, params)
     opt_state, o_shardings = init_optimizer_state(optimizer, params, p_shardings, mesh)
     if cfg.show_sharding:
         print0(sharding_table(params))
 
     # ---- checkpoint resume --------------------------------------------------
-    ckpt = Checkpointer(cfg.checkpoint_dir, t.keep_checkpoints)
     start_step, params, opt_state = ckpt.restore(params, opt_state)
     if start_step:
         print0(f"Resumed from step {start_step} ({cfg.checkpoint_dir})")
     if jax.process_index() == 0:
         cfg.save_json(f"{cfg.checkpoint_dir.rstrip('/')}/config.json")
 
-    # ---- compiled step ------------------------------------------------------
-    train_step = jax.jit(make_train_step(static, optimizer, ctx, accum),
-                         donate_argnums=(0, 1), out_shardings=(p_shardings, o_shardings, None))
-
+    # ---- data ---------------------------------------------------------------
     data_sharding = batch_sharding(mesh)
     train_ds = TokenDataset(cfg.data_path, t.sequence_length)
     loader = DataLoader(train_ds, t.global_batch_size, data_sharding, seed=t.seed, start_step=start_step)
 
+    # ---- compile ahead of time ----------------------------------------------
+    first_batch = next(loader)
+    tic = time.perf_counter()
+    train_step = jax.jit(make_train_step(static, optimizer, ctx, accum),
+                         donate_argnums=(0, 1), out_shardings=(p_shardings, o_shardings, None))
+    train_step = train_step.lower(params, opt_state, first_batch).compile()
+    print0(f"Compiled the train step in {time.perf_counter() - tic:.1f}s")
+    if cfg.show_collectives:
+        print0("Communication inserted by XLA:\n" + collectives_table(count_collectives(train_step.as_text(), mesh)))
+
     if cfg.dry_run:
-        compiled = train_step.lower(params, opt_state, next(loader)).compile()
-        mem = compiled.memory_analysis()
+        mem = train_step.memory_analysis()
         if mem is not None:
             for field in ("argument_size_in_bytes", "output_size_in_bytes", "temp_size_in_bytes"):
                 if hasattr(mem, field):
@@ -203,57 +225,76 @@ def train(cfg: Config) -> dict:
     logger = MetricLogger(cfg.wandb_project, cfg.run_name, cfg.to_dict())
     tokens_per_step = t.global_batch_size * t.sequence_length
     flops_per_step = flops_per_token(cfg.model, t.sequence_length) * tokens_per_step
-    peak = peak_flops_per_device() if ctx.dtype == jnp.bfloat16 else None
+    peak = cfg.peak_tflops * 1e12 if cfg.peak_tflops else (peak_flops_per_device() if ctx.dtype == jnp.bfloat16 else None)
 
     print0("Starting training...")
-    last = {}
+    last, done, last_saved, profiling = {}, start_step, start_step, False
     timer, last_logged = time.perf_counter(), start_step
-    for step in range(start_step, t.train_steps):
-        if cfg.profile_dir and step == start_step + 3:
-            jax.profiler.start_trace(cfg.profile_dir)
+    try:
+        for step in range(start_step, t.train_steps):
+            if cfg.profile_dir and step == start_step + 3:
+                jax.profiler.start_trace(cfg.profile_dir)
+                profiling = True
 
-        params, opt_state, metrics = train_step(params, opt_state, next(loader))
+            batch = first_batch if step == start_step else next(loader)
+            params, opt_state, metrics = train_step(params, opt_state, batch)
+            done = step + 1
 
-        if cfg.profile_dir and step == start_step + 6:
-            jax.block_until_ready(params)
+            if profiling and (step == start_step + 6 or done == t.train_steps):
+                jax.block_until_ready(params)
+                jax.profiler.stop_trace()
+                profiling = False
+                print0(f"Profile written to {cfg.profile_dir} (open with TensorBoard or https://ui.perfetto.dev)")
+
+            if done % t.log_every == 0 or step == start_step or done == t.train_steps:
+                metrics = jax.device_get(metrics)
+                loss = float(metrics["loss"])
+                if not math.isfinite(loss):
+                    raise FloatingPointError(f"Loss is {loss} at step {done}. Try a lower --lr, more --warmup, "
+                                             "or --dtype float32. The last good checkpoint is kept.")
+                elapsed = time.perf_counter() - timer
+                n = done - last_logged
+                tok_s = n * tokens_per_step / elapsed
+                line = (f"step {done:>6} | loss {loss:.4f} | grad_norm {float(metrics['grad_norm']):.3f} "
+                        f"| lr {float(schedule(step)):.2e} | {human(tok_s)} tok/s "
+                        f"| {human(tok_s / jax.device_count())} tok/s/device")
+                log = {"train/loss": loss, "train/grad_norm": float(metrics["grad_norm"]),
+                       "train/lr": float(schedule(step)), "perf/tokens_per_sec": tok_s}
+                if peak and step != start_step:
+                    mfu = n * flops_per_step / elapsed / (peak * jax.device_count())
+                    line += f" | MFU {mfu:.1%}"
+                    log["perf/mfu"] = mfu
+                print0(line)
+                logger.log(log, step=done)
+                last = log
+                timer, last_logged = time.perf_counter(), done
+
+            if eval_step is not None and done % t.eval_every == 0:
+                losses = [eval_step(params, to_global_array(b, data_sharding)) for b in val_batches]
+                val_loss = float(jnp.mean(jnp.stack(losses)))
+                print0(f"step {done:>6} | val_loss {val_loss:.4f}")
+                logger.log({"val/loss": val_loss}, step=done)
+                last["val/loss"] = val_loss
+                timer = time.perf_counter()
+
+            if done % t.save_every == 0 or done == t.train_steps:
+                ckpt.save(done, params, opt_state)
+                last_saved = done
+    except KeyboardInterrupt:
+        if jax.process_count() > 1:
+            raise
+        print0(f"\nInterrupted. Saving step {done} so the same command resumes from here...")
+        if done > last_saved:
+            try:
+                ckpt.save(done, params, opt_state)
+            except Exception as e:  # e.g. interrupted mid-step, buffers already donated
+                print0(f"Could not save step {done} ({e}); resuming from step {last_saved} instead.")
+    finally:
+        if profiling:
             jax.profiler.stop_trace()
-            print0(f"Profile written to {cfg.profile_dir} (open with TensorBoard or https://ui.perfetto.dev)")
+        ckpt.close()
+        loader.close()
+        logger.finish()
 
-        done = step + 1
-        if done % t.log_every == 0 or step == start_step or done == t.train_steps:
-            metrics = jax.device_get(metrics)
-            elapsed = time.perf_counter() - timer
-            n = done - last_logged
-            tok_s = n * tokens_per_step / elapsed
-            line = (f"step {done:>6} | loss {metrics['loss']:.4f} | grad_norm {metrics['grad_norm']:.3f} "
-                    f"| lr {float(schedule(step)):.2e} | {human(tok_s)} tok/s "
-                    f"| {human(tok_s / jax.device_count())} tok/s/device")
-            log = {"train/loss": float(metrics["loss"]), "train/grad_norm": float(metrics["grad_norm"]),
-                   "train/lr": float(schedule(step)), "perf/tokens_per_sec": tok_s}
-            if step == start_step:
-                line += " | (includes compilation)"
-            elif peak:
-                mfu = n * flops_per_step / elapsed / (peak * jax.device_count())
-                line += f" | MFU {mfu:.1%}"
-                log["perf/mfu"] = mfu
-            print0(line)
-            logger.log(log, step=done)
-            last = log
-            timer, last_logged = time.perf_counter(), done
-
-        if eval_step is not None and done % t.eval_every == 0:
-            losses = [eval_step(params, to_global_array(b, data_sharding)) for b in val_batches]
-            val_loss = float(jnp.mean(jnp.stack(losses)))
-            print0(f"step {done:>6} | val_loss {val_loss:.4f}")
-            logger.log({"val/loss": val_loss}, step=done)
-            last["val/loss"] = val_loss
-            timer = time.perf_counter()
-
-        if done % t.save_every == 0 or done == t.train_steps:
-            ckpt.save(done, params, opt_state)
-
-    ckpt.close()
-    loader.close()
-    logger.finish()
     print0(f"Done. Checkpoints in {ckpt.directory}")
     return last

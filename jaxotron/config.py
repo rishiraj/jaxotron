@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -38,6 +37,10 @@ class ParallelConfig:
     def data_parallel_size(self) -> int:
         return self.dp * self.fsdp
 
+    def describe(self) -> str:
+        active = [f"{n.upper()}={getattr(self, n)}" for n in ("dp", "fsdp", "pp", "cp", "tp") if getattr(self, n) > 1]
+        return " x ".join(active) if active else "single device"
+
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -50,26 +53,44 @@ class ModelConfig:
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
     init_std: float = 0.02
+    # Llama 3.1+ "llama3" RoPE frequency scaling. A factor of 0 disables it.
+    rope_scaling_factor: float = 0.0
+    rope_low_freq_factor: float = 1.0
+    rope_high_freq_factor: float = 4.0
+    rope_original_max_position: int = 8192
 
     @property
     def head_dim(self) -> int:
         return self.hidden_size // self.num_attention_heads
 
 
-# Llama-style architectures (trained from scratch).
+_LLAMA3_ROPE = dict(rope_theta=500000.0, rope_low_freq_factor=1.0, rope_high_freq_factor=4.0,
+                    rope_original_max_position=8192)
+
+# Llama-style architectures. Shapes match the public models, so `--init_from_hf`
+# checkpoints and from-scratch runs share the same code path.
 MODEL_PRESETS: dict[str, ModelConfig] = {
     "tiny": ModelConfig(),
     "125m": ModelConfig(vocab_size=49152, hidden_size=768, intermediate_size=2048,
                         num_hidden_layers=12, num_attention_heads=12, num_key_value_heads=4),
+    "smollm2-135m": ModelConfig(vocab_size=49152, hidden_size=576, intermediate_size=1536,
+                                num_hidden_layers=30, num_attention_heads=9, num_key_value_heads=3,
+                                rope_theta=100000.0),
+    "smollm2-360m": ModelConfig(vocab_size=49152, hidden_size=960, intermediate_size=2560,
+                                num_hidden_layers=32, num_attention_heads=15, num_key_value_heads=5,
+                                rope_theta=100000.0),
     "smollm2-1.7b": ModelConfig(vocab_size=49152, hidden_size=2048, intermediate_size=8192,
                                 num_hidden_layers=24, num_attention_heads=32, num_key_value_heads=32,
                                 rope_theta=130000.0),
     "llama3.2-1b": ModelConfig(vocab_size=128256, hidden_size=2048, intermediate_size=8192,
                                num_hidden_layers=16, num_attention_heads=32, num_key_value_heads=8,
-                               rope_theta=500000.0),
+                               rope_scaling_factor=32.0, **_LLAMA3_ROPE),
+    "llama3.2-3b": ModelConfig(vocab_size=128256, hidden_size=3072, intermediate_size=8192,
+                               num_hidden_layers=28, num_attention_heads=24, num_key_value_heads=8,
+                               rope_scaling_factor=32.0, **_LLAMA3_ROPE),
     "llama3.1-8b": ModelConfig(vocab_size=128256, hidden_size=4096, intermediate_size=14336,
                                num_hidden_layers=32, num_attention_heads=32, num_key_value_heads=8,
-                               rope_theta=500000.0),
+                               rope_scaling_factor=8.0, **_LLAMA3_ROPE),
 }
 
 
@@ -105,12 +126,16 @@ class Config:
     data_path: str = "data/synthetic/train.bin"
     val_path: Optional[str] = None
     checkpoint_dir: str = "checkpoints/run"
+    init_from_hf: Optional[str] = None  # Hugging Face repo id or local dir with Llama safetensors
     run_name: str = "jaxotron"
     wandb_project: Optional[str] = None
     distributed: bool = False
     profile_dir: Optional[str] = None
     dry_run: bool = False
     show_sharding: bool = False
+    show_mesh: bool = False
+    show_collectives: bool = False
+    peak_tflops: Optional[float] = None  # per-device peak for MFU on hardware that is not auto-detected
 
     # ---------------------------------------------------------------- derived
     @property
@@ -128,22 +153,20 @@ class Config:
     def validate(self, num_devices: int) -> None:
         p, m, t = self.parallel, self.model, self.train
         errors = []
+        for name in ("dp", "fsdp", "pp", "cp", "tp"):
+            if getattr(p, name) < 1:
+                errors.append(f"{name} must be >= 1.")
         if p.world_size != num_devices:
-            errors.append(f"dp*fsdp*pp*cp*tp = {p.world_size} but {num_devices} devices are available.")
-        if m.hidden_size % m.num_attention_heads:
-            errors.append("hidden_size must be divisible by num_attention_heads.")
-        if m.head_dim % 2:
-            errors.append("head_dim must be even for RoPE.")
-        if m.num_attention_heads % m.num_key_value_heads:
-            errors.append("num_attention_heads must be divisible by num_key_value_heads (GQA).")
-        if m.num_key_value_heads % p.tp:
-            errors.append(f"num_key_value_heads ({m.num_key_value_heads}) must be divisible by tp ({p.tp}).")
-        if m.num_hidden_layers % p.pp:
-            errors.append(f"num_hidden_layers ({m.num_hidden_layers}) must be divisible by pp ({p.pp}).")
+            errors.append(f"dp*fsdp*pp*cp*tp = {p.world_size} but {num_devices} devices are available. "
+                          f"(Tip: on a laptop use --cpu_devices {p.world_size}.)")
+        errors += model_errors(m, p)
         if t.sequence_length % p.cp:
             errors.append(f"sequence_length ({t.sequence_length}) must be divisible by cp ({p.cp}).")
-        if t.global_batch_size % (t.micro_batch_size * p.data_parallel_size):
-            errors.append("global_batch_size must be divisible by micro_batch_size * dp * fsdp.")
+        if t.micro_batch_size < 1 or t.global_batch_size < 1:
+            errors.append("micro_batch_size and global_batch_size must be positive.")
+        elif t.global_batch_size % (t.micro_batch_size * p.data_parallel_size):
+            errors.append(f"global_batch_size ({t.global_batch_size}) must be divisible by "
+                          f"micro_batch_size * dp * fsdp ({t.micro_batch_size * p.data_parallel_size}).")
         if p.pp > 1 and t.micro_batch_size % self.pp_microbatches:
             errors.append(f"micro_batch_size ({t.micro_batch_size}) must be divisible by "
                           f"pp_microbatches ({self.pp_microbatches}).")
@@ -155,6 +178,10 @@ class Config:
             errors.append("dtype must be auto, bfloat16 or float32.")
         if t.remat not in ("full", "dots", "none"):
             errors.append("remat must be full, dots or none.")
+        if t.train_steps < 1:
+            errors.append("train_steps must be >= 1.")
+        if t.log_every < 1 or t.save_every < 1:
+            errors.append("log_every and save_every must be >= 1.")
         if errors:
             raise ValueError("Invalid configuration:\n  - " + "\n  - ".join(errors))
 
@@ -169,19 +196,51 @@ class Config:
         p.write_text(json.dumps(self.to_dict(), indent=2))
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Config":
+    def from_dict(cls, d: dict[str, Any]) -> Config:
+        """Build a Config, ignoring unknown keys so older/newer config.json files still load."""
         d = dict(d)
         return cls(
-            parallel=ParallelConfig(**d.pop("parallel")),
-            model=ModelConfig(**d.pop("model")),
-            train=TrainConfig(**d.pop("train")),
-            **d,
+            parallel=_known(ParallelConfig, d.pop("parallel", {})),
+            model=_known(ModelConfig, d.pop("model", {})),
+            train=_known(TrainConfig, d.pop("train", {})),
+            **_known_kwargs(cls, d),
         )
 
     @classmethod
-    def load_json(cls, path: str) -> "Config":
+    def load_json(cls, path: str) -> Config:
         from etils import epath
         return cls.from_dict(json.loads(epath.Path(path).read_text()))
+
+
+def model_errors(m: ModelConfig, p: ParallelConfig) -> list[str]:
+    """Shape constraints between the model and the mesh (shared by training and generation)."""
+    errors = []
+    if m.hidden_size % m.num_attention_heads:
+        errors.append("hidden_size must be divisible by num_attention_heads.")
+    elif m.head_dim % 2:
+        errors.append("head_dim must be even for RoPE.")
+    if m.num_attention_heads % m.num_key_value_heads:
+        errors.append("num_attention_heads must be divisible by num_key_value_heads (GQA).")
+    if m.num_key_value_heads % p.tp:
+        errors.append(f"num_key_value_heads ({m.num_key_value_heads}) must be divisible by tp ({p.tp}).")
+    if m.intermediate_size % p.tp:
+        errors.append(f"intermediate_size ({m.intermediate_size}) must be divisible by tp ({p.tp}).")
+    if m.vocab_size % p.tp:
+        errors.append(f"vocab_size ({m.vocab_size}) must be divisible by tp ({p.tp}).")
+    if m.hidden_size % p.fsdp:
+        errors.append(f"hidden_size ({m.hidden_size}) must be divisible by fsdp ({p.fsdp}).")
+    if m.num_hidden_layers % p.pp:
+        errors.append(f"num_hidden_layers ({m.num_hidden_layers}) must be divisible by pp ({p.pp}).")
+    return errors
+
+
+def _known_kwargs(cls, d: dict) -> dict:
+    names = {f.name for f in dataclasses.fields(cls)}
+    return {k: v for k, v in d.items() if k in names}
+
+
+def _known(cls, d: dict):
+    return cls(**_known_kwargs(cls, d))
 
 
 def _parse_value(raw: str, current: Any) -> Any:
@@ -203,10 +262,12 @@ def apply_override(cfg: Config, key: str, raw: str) -> None:
     """Apply an override such as ``train.learning_rate=3e-4`` or ``model.rope_theta=5e5``."""
     section, _, name = key.partition(".")
     if not name:
+        if not hasattr(cfg, section):
+            raise AttributeError(f"Unknown config key: {key}")
         setattr(cfg, section, _parse_value(raw, getattr(cfg, section)))
         return
-    obj = getattr(cfg, section)
-    if not hasattr(obj, name):
+    obj = getattr(cfg, section, None)
+    if obj is None or not dataclasses.is_dataclass(obj) or not hasattr(obj, name):
         raise AttributeError(f"Unknown config key: {key}")
     value = _parse_value(raw, getattr(obj, name))
     if obj.__dataclass_params__.frozen:

@@ -18,15 +18,24 @@ Praxis and MaxText):
 
 The backward pass needs no extra code: jax.grad differentiates through the
 loop, producing the mirrored backward pipeline automatically.
+
+Compare with Picotron's pipeline_parallel.py, where the forward and backward
+schedules (AFAB / 1F1B), send/recv pairs and gradient bookkeeping are written
+by hand.
 """
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
 
 from jaxotron.parallel.context import ParallelContext
+
+
+def bubble_fraction(num_stages: int, num_microbatches: int) -> float:
+    """Fraction of pipeline time that each stage is idle in the GPipe schedule."""
+    return (num_stages - 1) / (num_microbatches + num_stages - 1)
 
 
 def split_microbatches(x: jax.Array, num: int) -> jax.Array:

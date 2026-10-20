@@ -4,16 +4,21 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaxotron"
-version = "0.2.0"
+version = "0.3.0"
 description = "Minimal, hackable 4D-parallel (DP/FSDP, TP, PP, CP) LLM pre-training in JAX"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 authors = [{ name = "Jaxotron contributors" }]
 keywords = ["jax", "llm", "distributed-training", "tensor-parallelism", "pipeline-parallelism",
-            "context-parallelism", "fsdp", "tpu", "education"]
+            "context-parallelism", "fsdp", "tpu", "education", "llama"]
 classifiers = [
+  "Development Status :: 4 - Beta",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "License :: OSI Approved :: Apache Software License",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Intended Audience :: Education",
@@ -29,16 +34,34 @@ dependencies = [
 
 [project.optional-dependencies]
 cuda = ["jax[cuda12]>=0.4.35"]
+cuda13 = ["jax[cuda13]>=0.7.0"]
 tpu = ["jax[tpu]>=0.4.35"]
-data = ["datasets>=2.19", "transformers>=4.40"]
+hf = ["huggingface_hub>=0.23", "transformers>=4.40"]
+data = ["datasets>=2.19", "transformers>=4.40", "huggingface_hub>=0.23"]
 wandb = ["wandb"]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[project.scripts]
+jaxotron-train = "jaxotron.cli.train:main"
+jaxotron-generate = "jaxotron.cli.generate:main"
+jaxotron-prepare-data = "jaxotron.cli.prepare_data:main"
 
 [project.urls]
 Homepage = "https://github.com/rishiraj/jaxotron"
+Issues = "https://github.com/rishiraj/jaxotron/issues"
 
 [tool.setuptools.packages.find]
 include = ["jaxotron*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: end-to-end training runs (deselect with -m 'not slow')"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["notebooks"]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "E731", "E741", "B023", "B905", "UP007", "UP045"]

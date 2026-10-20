@@ -1,6 +1,9 @@
 """Llama building blocks: RMSNorm, rotary embeddings and causal GQA attention."""
 from __future__ import annotations
 
+import math
+from typing import Optional
+
 import jax
 import jax.numpy as jnp
 
@@ -13,10 +16,30 @@ def rms_norm(x: jax.Array, weight: jax.Array, eps: float) -> jax.Array:
     return x32.astype(dtype) * weight.astype(dtype)
 
 
-def rope_tables(seq_len: int, head_dim: int, theta: float) -> tuple[jax.Array, jax.Array]:
-    """cos/sin tables of shape [seq_len, head_dim // 2] (float32)."""
+def rope_inv_freq(head_dim: int, theta: float, scaling: Optional[tuple[float, float, float, int]] = None):
+    """Inverse frequencies [head_dim // 2], optionally with Llama 3.1 "llama3" scaling.
+
+    scaling = (factor, low_freq_factor, high_freq_factor, original_max_position).
+    Long wavelengths are divided by `factor`, short ones are kept and the band in
+    between is interpolated (identical to Hugging Face `rope_type="llama3"`).
+    """
     inv_freq = 1.0 / (theta ** (jnp.arange(0, head_dim, 2, dtype=jnp.float32) / head_dim))
-    angles = jnp.outer(jnp.arange(seq_len, dtype=jnp.float32), inv_freq)
+    if not scaling or not scaling[0]:
+        return inv_freq
+    factor, low, high, original = scaling
+    low_wavelen, high_wavelen = original / low, original / high
+    wavelen = 2 * math.pi / inv_freq
+    scaled = jnp.where(wavelen > low_wavelen, inv_freq / factor, inv_freq)
+    smooth = (original / wavelen - low) / (high - low)
+    smoothed = (1 - smooth) * scaled / factor + smooth * scaled
+    is_medium = (wavelen >= high_wavelen) & (wavelen <= low_wavelen)
+    return jnp.where(is_medium, smoothed, scaled)
+
+
+def rope_tables(seq_len: int, head_dim: int, theta: float,
+                scaling: Optional[tuple[float, float, float, int]] = None) -> tuple[jax.Array, jax.Array]:
+    """cos/sin tables of shape [seq_len, head_dim // 2] (float32)."""
+    angles = jnp.outer(jnp.arange(seq_len, dtype=jnp.float32), rope_inv_freq(head_dim, theta, scaling))
     return jnp.cos(angles), jnp.sin(angles)
 
 

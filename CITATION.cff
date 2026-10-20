@@ -6,5 +6,6 @@ authors:
   - name: "Jaxotron contributors"
 repository-code: "https://github.com/rishiraj/jaxotron"
 license: Apache-2.0
-version: 0.2.0
-keywords: [jax, distributed training, LLM, tensor parallelism, pipeline parallelism, context parallelism]
+version: 0.3.0
+date-released: "2026-10-20"
+keywords: [jax, distributed training, LLM, data parallelism, fsdp, tensor parallelism, pipeline parallelism, context parallelism]

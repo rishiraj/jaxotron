@@ -1,17 +1,20 @@
-"""Logging, throughput/MFU accounting and sharding inspection."""
+"""Logging, throughput/MFU accounting, compilation cache and sharding inspection."""
 from __future__ import annotations
 
 import math
+import os
 from typing import Optional
 
 import jax
 
-# Dense bf16 peak FLOP/s per device. Order matters: more specific names first.
+# Dense bf16 peak FLOP/s per device. Matched as substrings of device_kind, so
+# more specific names come first. Unknown hardware: pass --peak_tflops.
 _PEAK_BF16_FLOPS = [
-    ("h200", 989e12), ("h100", 989e12), ("gh200", 989e12), ("a100", 312e12), ("l40s", 362e12),
-    ("l4", 121e12), ("a10g", 70e12), ("tpu v6 lite", 918e12), ("tpu v6e", 918e12),
-    ("tpu v5 lite", 197e12), ("tpu v5e", 197e12), ("tpu v5p", 459e12), ("tpu v5", 459e12),
-    ("tpu v4", 275e12), ("tpu v3", 123e12),
+    ("gb200", 2450e12), ("b200", 2250e12), ("h100 pcie", 756e12), ("h200", 989e12), ("h100", 989e12),
+    ("h800", 989e12), ("gh200", 989e12), ("a100", 312e12), ("a800", 312e12), ("l40s", 362e12),
+    ("l4", 121e12), ("a10g", 70e12), ("rtx 4090", 165e12), ("mi300x", 1307e12), ("mi250", 362e12),
+    ("tpu v6 lite", 918e12), ("tpu v6e", 918e12), ("tpu v5 lite", 197e12), ("tpu v5e", 197e12),
+    ("tpu v5p", 459e12), ("tpu v5", 459e12), ("tpu v4", 275e12), ("tpu v3", 123e12), ("tpu v2", 45e12),
 ]
 
 
@@ -30,6 +33,18 @@ def peak_flops_per_device() -> Optional[float]:
         if name in kind:
             return flops
     return None
+
+
+def enable_compilation_cache(directory: Optional[str]) -> None:
+    """Persist compiled XLA programs so the second run of a demo starts almost instantly."""
+    if not directory:
+        return
+    try:
+        jax.config.update("jax_compilation_cache_dir", os.path.expanduser(directory))
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.5)
+        jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    except Exception as e:  # the cache is an optimisation, never a reason to fail
+        print0(f"Compilation cache disabled: {e}")
 
 
 def human(n: float, unit: str = "") -> str:

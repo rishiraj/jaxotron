@@ -33,8 +33,11 @@ class Checkpointer:
     def latest_step(self) -> Optional[int]:
         return self.manager.latest_step()
 
-    def save(self, step: int, params, opt_state) -> None:
-        self.manager.save(step, args=ocp.args.Composite(
+    def save(self, step: int, params, opt_state) -> bool:
+        """Start an async save. Returns False if this step is already saved."""
+        if step in self.manager.all_steps():
+            return False
+        return self.manager.save(step, args=ocp.args.Composite(
             params=ocp.args.StandardSave(params),
             opt_state=ocp.args.StandardSave(opt_state),
         ))

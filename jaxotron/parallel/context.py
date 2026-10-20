@@ -24,5 +24,7 @@ class ParallelContext:
         """Annotate an activation with its logical axes. GSPMD does the rest."""
         if self.mesh is None or self.mesh.size == 1:
             return x
+        if len(logical_axes) != x.ndim:
+            raise ValueError(f"Got {len(logical_axes)} logical axes {logical_axes} for an array of shape {x.shape}.")
         spec = logical_to_spec(logical_axes, ACTIVATION_RULES)
         return jax.lax.with_sharding_constraint(x, NamedSharding(self.mesh, spec))

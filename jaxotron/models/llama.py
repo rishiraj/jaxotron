@@ -70,6 +70,13 @@ class Llama(eqx.Module):
         self.lm_head = cfg.init_std * jax.random.normal(k_head, (cfg.hidden_size, cfg.vocab_size), jnp.float32)
 
 
+def rope_scaling(cfg: ModelConfig):
+    if not cfg.rope_scaling_factor:
+        return None
+    return (cfg.rope_scaling_factor, cfg.rope_low_freq_factor, cfg.rope_high_freq_factor,
+            cfg.rope_original_max_position)
+
+
 def block_forward(p: Block, x: jax.Array, cos, sin, ctx: ParallelContext, eps: float) -> jax.Array:
     """One decoder layer. Sharding annotations name each activation's logical axes."""
     # --- Attention -----------------------------------------------------------
@@ -117,7 +124,7 @@ def forward(model: Llama, tokens: jax.Array, ctx: ParallelContext) -> jax.Array:
     x = jnp.take(model.embed.astype(dtype), tokens, axis=0)
     x = ctx.shard(x, "batch", "seq", "act_embed")
 
-    cos, sin = rope_tables(seq_len, cfg.head_dim, cfg.rope_theta)
+    cos, sin = rope_tables(seq_len, cfg.head_dim, cfg.rope_theta, rope_scaling(cfg))
     blocks = jax.tree.map(lambda a: a.astype(dtype), model.blocks)  # mixed precision: bf16 compute
     stage_fn = partial(run_layers, cos=cos, sin=sin, ctx=ctx, eps=cfg.rms_norm_eps)
 

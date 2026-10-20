@@ -10,7 +10,8 @@ Change a rule here and the whole model is re-parallelised. No model code changes
 from __future__ import annotations
 
 import jax
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 # How parameters are laid out across the mesh.
 WEIGHT_RULES: dict[str, object] = {
@@ -56,13 +57,19 @@ def logical_to_spec(axes, rules) -> P:
     return P(*(rules.get(a) if a is not None else None for a in axes))
 
 
-def _leaf_name(path) -> str:
+def leaf_name(path) -> str:
+    """Field name of a pytree leaf, e.g. 'wq' for model.blocks.wq."""
     key = path[-1]
     return getattr(key, "name", getattr(key, "key", str(key)))
 
 
+_leaf_name = leaf_name  # backwards compatibility
+
+
 def param_spec(path, leaf) -> P:
-    name = _leaf_name(path)
+    name = leaf_name(path)
+    if name not in PARAM_LOGICAL_AXES:
+        raise KeyError(f"No sharding rule for parameter {name!r}. Add it to PARAM_LOGICAL_AXES.")
     axes = PARAM_LOGICAL_AXES[name]
     if len(axes) != len(leaf.shape):
         raise ValueError(f"Parameter {name} has shape {leaf.shape} but logical axes {axes}.")

@@ -8,8 +8,8 @@ so it goes first (and can span slower links between nodes).
 """
 from __future__ import annotations
 
-import numpy as np
 import jax
+import numpy as np
 from jax.sharding import Mesh
 
 from jaxotron.config import ParallelConfig
@@ -25,7 +25,7 @@ def create_mesh(pcfg: ParallelConfig, devices=None) -> Mesh:
         raise ValueError(f"Mesh shape {dict(zip(MESH_AXES, shape))} needs {int(np.prod(shape))} devices, "
                          f"got {len(devices)}.")
     device_array = None
-    if all_devices:
+    if all_devices and len(devices) > 1:
         try:  # topology-aware placement on TPU pods / multi-GPU nodes
             from jax.experimental import mesh_utils
             device_array = mesh_utils.create_device_mesh(shape, devices=devices)
@@ -34,3 +34,15 @@ def create_mesh(pcfg: ParallelConfig, devices=None) -> Mesh:
     if device_array is None:
         device_array = np.asarray(devices, dtype=object).reshape(shape)
     return Mesh(device_array, MESH_AXES)
+
+
+def mesh_table(mesh: Mesh) -> str:
+    """Which mesh coordinates every device owns. Handy on a slide next to rules.py."""
+    names = [n for n in mesh.axis_names if mesh.shape[n] > 1] or list(mesh.axis_names)
+    header = f"{'device':<8}" + "".join(f"{n:>6}" for n in names) + "   kind"
+    lines = [header, "-" * len(header)]
+    for coords in np.ndindex(mesh.devices.shape):
+        d = mesh.devices[coords]
+        c = dict(zip(mesh.axis_names, coords))
+        lines.append(f"{d.id:<8}" + "".join(f"{c[n]:>6}" for n in names) + f"   {d.device_kind}")
+    return "\n".join(lines)
