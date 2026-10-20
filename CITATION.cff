@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+title: "Jaxotron: Minimal 4D-Parallel LLM Pre-training in JAX"
+message: "If you use this software, please cite it using these metadata."
+type: software
+authors:
+  - given-names: "Rishiraj"
+    family-names: "Acharya"
+repository-code: "https://github.com/rishiraj/jaxotron"
+license: Apache-2.0
+version: 0.4.0
+date-released: "2026-10-20"
+keywords:
+  - jax
+  - distributed training
+  - LLM
+  - 4d parallelism
+  - data parallelism
+  - fsdp
+  - tensor parallelism
+  - sequence parallelism
+  - pipeline parallelism
+  - context parallelism

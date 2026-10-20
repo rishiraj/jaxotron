@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jaxotron"
+version = "0.4.0"
+description = "Minimal, hackable 4D-parallel (DP/FSDP, TP/SP, PP, CP) LLM pre-training and inference in JAX"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "Rishiraj Acharya" }]
+keywords = [
+  "jax", "llm", "distributed-training", "4d-parallelism", "tensor-parallelism",
+  "sequence-parallelism", "pipeline-parallelism", "context-parallelism", "fsdp",
+  "tpu", "gpu", "education", "llama", "qwen3", "smollm2",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Intended Audience :: Education",
+  "Intended Audience :: Science/Research",
+]
+dependencies = [
+  "jax>=0.4.35",
+  "equinox>=0.11.4",
+  "optax>=0.2.3",
+  "orbax-checkpoint>=0.6.0",
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+cuda = ["jax[cuda12]>=0.4.35"]
+cuda13 = ["jax[cuda13]>=0.7.0"]
+tpu = ["jax[tpu]>=0.4.35"]
+hf = ["huggingface_hub>=0.23", "transformers>=4.45"]
+data = ["datasets>=2.19", "transformers>=4.45", "huggingface_hub>=0.23"]
+wandb = ["wandb"]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[project.scripts]
+jaxotron-train = "jaxotron.cli.train:main"
+jaxotron-generate = "jaxotron.cli.generate:main"
+jaxotron-prepare-data = "jaxotron.cli.prepare_data:main"
+jaxotron-compare = "jaxotron.cli.compare:main"
+
+[project.urls]
+Homepage = "https://github.com/rishiraj/jaxotron"
+Issues = "https://github.com/rishiraj/jaxotron/issues"
+
+[tool.setuptools.packages.find]
+include = ["jaxotron*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: end-to-end training runs (deselect with -m 'not slow')"]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["notebooks"]
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "E731", "E741", "B023", "B905", "UP007", "UP045"]
