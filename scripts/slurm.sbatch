@@ -1,0 +1,22 @@
+#!/bin/bash
+# Multi-node GPU training with SLURM. One process per node; JAX sees all local GPUs.
+# Submit: sbatch scripts/slurm.sbatch
+#SBATCH --job-name=jaxotron
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=32
+#SBATCH --time=04:00:00
+#SBATCH --output=logs/%x_%j.out
+
+set -euo pipefail
+mkdir -p logs
+export XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
+
+# 16 GPUs: dp crosses nodes (cheap, once per step); tp stays inside a node (NVLink).
+srun python train.py --distributed \
+  --preset 125m --data data/tinystories/train.bin \
+  --dp 2 --fsdp 4 --tp 2 \
+  --seq_len 2048 --global_batch_size 256 --micro_batch_size 8 \
+  --lr 6e-4 --warmup 500 --steps 10000 --eval_every 500 --save_every 1000 \
+  --checkpoint_dir checkpoints/125m --wandb_project jaxotron
