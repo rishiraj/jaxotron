@@ -12,20 +12,35 @@ jaxotron-train --cpu_devices 4 --tp 4 --sp --dry_run --show_collectives
 jaxotron-train --init_from_hf Qwen/Qwen3-0.6B --fsdp 8 --data data/tinystories/train.bin \
     --seq_len 1024 --global_batch_size 64 --micro_batch_size 8 --lr 3e-4 --steps 1000
 
-# Train from a saved JSON config (Picotron style) with optional overrides:
-jaxotron-train --config checkpoints/run/config.json --set train.learning_rate=3e-4
+# Train from a saved JSON config (Picotron style); flags you type override the file:
+jaxotron-train --config checkpoints/run/config.json --steps 600 --set train.learning_rate=3e-4
 """
 from __future__ import annotations
 
 import argparse
 import os
 
+# CLI flag -> Config field. With --config, only the flags typed on the command line override the file.
+_FLAG_TO_FIELD = {
+    "dp": "parallel.dp", "fsdp": "parallel.fsdp", "pp": "parallel.pp", "cp": "parallel.cp", "tp": "parallel.tp",
+    "sp": "parallel.sp", "pp_microbatches": "parallel.pp_microbatches",
+    "seq_len": "train.sequence_length", "global_batch_size": "train.global_batch_size",
+    "micro_batch_size": "train.micro_batch_size", "steps": "train.train_steps", "max_tokens": "train.max_tokens",
+    "lr": "train.learning_rate", "warmup": "train.warmup_steps", "dtype": "train.dtype", "remat": "train.remat",
+    "attention": "train.attention_impl", "log_every": "train.log_every", "eval_every": "train.eval_every",
+    "save_every": "train.save_every", "seed": "train.seed",
+    "data": "data_path", "val_data": "val_path", "checkpoint_dir": "checkpoint_dir", "run_name": "run_name",
+    "wandb_project": "wandb_project", "distributed": "distributed", "dry_run": "dry_run",
+    "show_sharding": "show_sharding", "show_mesh": "show_mesh", "show_collectives": "show_collectives",
+    "profile_dir": "profile_dir", "peak_tflops": "peak_tflops",
+}
 
-def parse_args(argv=None):
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Jaxotron: 4D-parallel LLM pre-training in JAX",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--config", default=None, metavar="JSON",
-                    help="load a full Config JSON file (CLI flags and --set override it)")
+                    help="load a full Config JSON file (CLI flags you type and --set override it)")
 
     g = ap.add_argument_group("parallelism (product must equal the number of devices)")
     for axis, desc in (("dp", "data"), ("fsdp", "fully-sharded data (ZeRO-3)"), ("pp", "pipeline"),
@@ -80,7 +95,27 @@ def parse_args(argv=None):
                    help="persistent XLA compilation cache ('' disables)")
     g.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                    help="override any config field, e.g. train.weight_decay=0.05")
-    return ap.parse_args(argv)
+    return ap
+
+
+def parse_args(argv=None):
+    return build_parser().parse_args(argv)
+
+
+def explicit_flags(argv=None) -> set[str]:
+    """Destinations of the flags actually typed on the command line (as opposed to argparse defaults)."""
+    probe = build_parser()
+    for action in probe._actions:
+        action.default = argparse.SUPPRESS
+    return set(vars(probe.parse_args(argv)))
+
+
+def _set_field(cfg, path: str, value) -> None:
+    section, _, name = path.partition(".")
+    if name:
+        setattr(getattr(cfg, section), name, value)
+    else:
+        setattr(cfg, section, value)
 
 
 def setup_cpu_devices(n: int) -> None:
@@ -108,10 +143,17 @@ def main(argv=None):
             print(f"{name:<14} {count_params(m) / 1e6:8.1f}M params | layers={m.num_hidden_layers:<2} "
                   f"hidden={m.hidden_size:<4} heads={m.num_attention_heads}/{m.num_key_value_heads} "
                   f"head_dim={m.head_dim:<3} vocab={m.vocab_size}{extra}")
+        print("(counts include a separate lm_head; tied checkpoints are untied when loaded)")
         return
 
     if args.config:
         cfg = Config.load_json(args.config)
+        given = explicit_flags(argv)
+        ignored = sorted(given & {"preset", "init_from_hf", "vocab_size"})
+        if ignored:
+            print(f"Note: --{', --'.join(ignored)} ignored with --config (the model comes from the file).")
+        for flag in sorted(given & _FLAG_TO_FIELD.keys()):
+            _set_field(cfg, _FLAG_TO_FIELD[flag], getattr(args, flag))
     else:
         if args.preset not in MODEL_PRESETS:
             raise SystemExit(f"Unknown preset {args.preset!r}. Choose from {sorted(MODEL_PRESETS)}")

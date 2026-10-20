@@ -20,6 +20,7 @@ from __future__ import annotations
 import collections
 import re
 from collections.abc import Iterable
+from typing import Optional
 
 import numpy as np
 from jax.sharding import Mesh
@@ -36,7 +37,7 @@ _BYTES = {"pred": 1, "s8": 1, "u8": 1, "s16": 2, "u16": 2, "bf16": 2, "f16": 2,
           "s32": 4, "u32": 4, "f32": 4, "s64": 8, "u64": 8, "f64": 8}
 
 
-def _parse_groups(line: str) -> list[list[int]]:
+def _parse_groups(line: str, num_devices: Optional[int] = None) -> list[list[int]]:
     m = _GROUPS_MESH_RE.search(line)
     if m:  # newer XLA / Shardy: mesh['a'=2,'b'=4] {'b'} = groups along the listed axes of a device grid
         dims = re.findall(r"['\"]?([a-zA-Z0-9_]+)['\"]?=(\d+)", m.group(1))
@@ -56,7 +57,10 @@ def _parse_groups(line: str) -> list[list[int]]:
         return ids.reshape(out_shape[0], -1).tolist()
     m = _GROUPS_LIST_RE.search(line)
     if m:
-        return [[int(x) for x in g.split(",") if x.strip()] for g in re.findall(r"\{([\d,\s]*)\}", m.group(1))]
+        groups = [[int(x) for x in g.split(",") if x.strip()] for g in re.findall(r"\{([\d,\s]*)\}", m.group(1))]
+        if not groups and num_devices:  # `replica_groups={}` is a single group containing every device
+            return [list(range(num_devices))]
+        return groups
     m = _PAIRS_RE.search(line)
     if m:
         return [[int(a), int(b)] for a, b in re.findall(r"\{(\d+),(\d+)\}", m.group(1))]
@@ -93,7 +97,7 @@ def count_collectives(hlo_text: str, mesh: Mesh) -> dict[tuple[str, tuple[str, .
         m = _OP_RE.search(line)
         if not m or "-done(" in line:
             continue
-        key = (m.group(1), _axes_for_groups(_parse_groups(line), mesh))
+        key = (m.group(1), _axes_for_groups(_parse_groups(line, mesh.size), mesh))
         stats[key]["count"] += 1
         stats[key]["bytes"] += _result_bytes(line)
     return dict(stats)

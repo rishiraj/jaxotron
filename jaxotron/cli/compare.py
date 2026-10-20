@@ -4,6 +4,9 @@ Runs one forward + backward step across 8 layouts (Single device, DP, FSDP,
 TP, TP+SP, CP, PP, and Full 4D) on the exact same batch and random seed, and
 prints per-device parameter memory, XLA collectives, and max gradient difference
 against the single-device baseline. Ideal for conference talks and sanity checks.
+
+On a machine with 8 accelerators (e.g. a Kaggle TPU v5e-8) the 16-device 4D row
+is replaced by a 3D (PP x CP x TP) row.
 """
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ from jaxotron.cli.train import setup_cpu_devices
 
 
 def parse_args(argv=None):
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cpu_devices", type=int, default=16, help="simulated CPU devices (0 uses real devices)")
     ap.add_argument("--seq_len", type=int, default=32)
     ap.add_argument("--global_batch_size", type=int, default=16)
@@ -38,6 +41,9 @@ def main(argv=None):
     from jaxotron.trainer import init_model, make_context, make_grad_fn
     from jaxotron.utils import enable_compilation_cache
 
+    # TPUs (and TF32 GPUs) run float32 matmuls in reduced precision by default. Full precision makes
+    # the parity column measure the parallel layout, not the matmul unit.
+    jax.config.update("jax_default_matmul_precision", "highest")
     enable_compilation_cache(args.compile_cache)
     model = ModelConfig(vocab_size=128, hidden_size=64, intermediate_size=128,
                         num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=4)
@@ -53,13 +59,16 @@ def main(argv=None):
         ("PP = 4 (GPipe)", dict(pp=4)),
         ("4D (2x2x2x2)", dict(dp=2, pp=2, cp=2, tp=2)),
     ]
+    if 8 <= jax.device_count() < 16:
+        layouts[-1] = ("3D PPxCPxTP (2x2x2)", dict(pp=2, cp=2, tp=2))
 
     rows = [("strategy", "devices", "KB/device", "loss", "max |Δgrad|", "XLA collectives (mesh axis)")]
-    ref_grads = None
+    ref_grads, skipped = None, []
 
     for label, kw in layouts:
         pcfg = ParallelConfig(**kw)
         if pcfg.world_size > jax.device_count():
+            skipped.append(f"{label} (needs {pcfg.world_size} devices)")
             continue
         cfg = Config(
             parallel=pcfg,
@@ -110,6 +119,9 @@ def main(argv=None):
     print("-" * len(header))
     for r in rows[1:]:
         print("  ".join(c.ljust(w) for c, w in zip(r, widths)))
+    if skipped:
+        print(f"Skipped: {', '.join(skipped)}. Use --cpu_devices 16 to simulate them.")
+    print("(KB/device counts parameters only; AdamW state follows the same sharding.)")
 
 
 if __name__ == "__main__":

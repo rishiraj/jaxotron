@@ -3,8 +3,9 @@
 #
 #   bash scripts/demo_4d.sh            # interactive: press Enter between acts
 #   bash scripts/demo_4d.sh --warmup   # run every act once, non-interactively, before the talk
-#                                      # (fills the XLA compilation cache, downloads SmolLM2)
+#                                      # (fills the XLA compilation cache, downloads SmolLM2 and Qwen3)
 #   DEMO_OFFLINE=1 bash scripts/demo_4d.sh   # skip act 7 (needs internet + jaxotron[hf])
+#   DEMO_SKIP_QWEN3=1 bash scripts/demo_4d.sh  # act 7 with SmolLM2 only (Qwen3-0.6B is a ~1.5 GB download)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -30,7 +31,11 @@ pause "Act 2: FSDP (ZeRO-3) across 8 devices. Watch MB/device shrink 8x in the s
 python train.py --cpu_devices 8 --fsdp 8 $SMALL --micro_batch_size 2 --steps 1 \
   --show_sharding --dry_run --checkpoint_dir "$OUT/fsdp"
 
-pause "Act 3: Tensor Parallel vs Tensor + Sequence Parallel (--sp). Watch all-reduce become all-gather + reduce-scatter."
+pause "Act 3a: Tensor Parallel (TP=4). Note the all-reduce over tp after wo and w_down."
+python train.py --cpu_devices 4 --tp 4 $SMALL --steps 1 --dry_run --show_collectives \
+  --checkpoint_dir "$OUT/tp"
+
+pause "Act 3b: same layout + Sequence Parallel (--sp). The all-reduce becomes all-gather + reduce-scatter."
 python train.py --cpu_devices 4 --tp 4 --sp $SMALL --steps 1 --dry_run --show_collectives \
   --checkpoint_dir "$OUT/tpsp"
 
@@ -51,6 +56,13 @@ if [[ "${DEMO_OFFLINE:-0}" != "1" ]]; then
   python generate.py --hf HuggingFaceTB/SmolLM2-135M --cpu_devices 3 --tp 3 \
     --prompt "The three laws of motion are" --max_new_tokens 40 --temperature 0 \
     || echo "(Act 7 skipped: needs internet and pip install \"jaxotron[hf]\")"
+
+  if [[ "${DEMO_SKIP_QWEN3:-0}" != "1" ]]; then
+    pause "Act 7b: Qwen3-0.6B (QK-Norm, head_dim=128) with 4-way tensor parallelism."
+    python generate.py --hf Qwen/Qwen3-0.6B --cpu_devices 4 --tp 4 \
+      --prompt "Distributed training in JAX is" --max_new_tokens 40 --temperature 0 \
+      || echo "(Act 7b skipped: needs internet and pip install \"jaxotron[hf]\")"
+  fi
 fi
 
 echo

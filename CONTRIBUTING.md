@@ -19,7 +19,7 @@ The optional Hugging Face `transformers` parity test also uses PyTorch if instal
 
 - **Every parallel layout must match a single device.** If you touch the model, sharding rules or pipeline, add or keep a case in `tests/test_parallelism.py`.
 - **Keep the core small.** New dependencies go into an optional extra. The five core dependencies (`jax`, `equinox`, `optax`, `orbax-checkpoint`, `numpy`) are a feature.
-- **No experimental APIs.** Prefer stable JAX APIs that work from the minimum supported version (`jax>=0.4.35`) through the latest release (`jax>=0.9`).
+- **No experimental APIs.** Prefer stable JAX APIs that work from the minimum supported version (`jax>=0.4.35`) through the latest release (`jax>=0.10`).
 - **Comments explain *why*.** The code is read on slides at conferences and DevFests; keep functions short and names obvious.
 
 ## Good first contributions

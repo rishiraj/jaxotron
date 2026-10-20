@@ -176,11 +176,18 @@ def forward(model: Llama, tokens: jax.Array, ctx: ParallelContext) -> jax.Array:
     return ctx.shard(logits, "batch", "seq", "vocab")
 
 
+def kv_cache_sharding(ctx: ParallelContext) -> Optional[NamedSharding]:
+    """Layout of the KV cache: [layers, batch, max_seq, kv_heads, head_dim], kv heads split over tp."""
+    if ctx.mesh is None or ctx.mesh.size == 1:
+        return None
+    return NamedSharding(ctx.mesh, P("pp", ("dp", "fsdp"), None, "tp", None))
+
+
 def init_kv_cache(cfg: ModelConfig, batch_size: int, max_seq: int, ctx: ParallelContext) -> KVCache:
     """Allocate a sharded, zero-initialised KV cache for autoregressive generation (when pp == 1 and cp == 1)."""
     shape = (cfg.num_hidden_layers, batch_size, max_seq, cfg.num_key_value_heads, cfg.head_dim)
-    if ctx.mesh is not None and ctx.mesh.size > 1:
-        sharding = NamedSharding(ctx.mesh, P("pp", ("dp", "fsdp"), None, "tp", None))
+    sharding = kv_cache_sharding(ctx)
+    if sharding is not None:
         zeros = jax.jit(lambda: jnp.zeros(shape, ctx.dtype), out_shardings=sharding)
         return KVCache(k=zeros(), v=zeros())
     return KVCache(k=jnp.zeros(shape, ctx.dtype), v=jnp.zeros(shape, ctx.dtype))
@@ -226,6 +233,10 @@ def forward_cached(
         return h + ctx.shard(out, "batch", "seq", "act_embed"), (k_cache, v_cache)
 
     x, (new_k, new_v) = jax.lax.scan(body, x, (blocks, cache.k, cache.v))
+    sharding = kv_cache_sharding(ctx)
+    if sharding is not None:  # same layout in and out, so every decode step reuses one compiled program
+        new_k = jax.lax.with_sharding_constraint(new_k, sharding)
+        new_v = jax.lax.with_sharding_constraint(new_v, sharding)
     x = rms_norm(x, model.final_norm, cfg.rms_norm_eps)
     logits = jnp.einsum("btd,dv->btv", x, model.lm_head.astype(dtype), preferred_element_type=jnp.float32)
     return ctx.shard(logits, "batch", "seq", "vocab"), KVCache(k=new_k, v=new_v)
@@ -239,7 +250,7 @@ def count_params(cfg: ModelConfig) -> int:
         per_layer += 2 * hd
     if cfg.qkv_bias:
         per_layer += (h + 2 * kv) * hd
-    return 2 * v * d + l * per_layer + d
+    return 2 * v * d + l * per_layer + d  # embed and lm_head are separate arrays (tied checkpoints are untied)
 
 
 def flops_per_token(cfg: ModelConfig, seq_len: int) -> float:

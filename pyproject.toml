@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,8 @@ name = "jaxotron"
 version = "0.4.0"
 description = "Minimal, hackable 4D-parallel (DP/FSDP, TP/SP, PP, CP) LLM pre-training and inference in JAX"
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [{ name = "Jaxotron contributors" }]
 keywords = [
@@ -22,7 +23,6 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
-  "License :: OSI Approved :: Apache Software License",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
   "Intended Audience :: Education",
   "Intended Audience :: Science/Research",

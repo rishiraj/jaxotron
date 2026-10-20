@@ -10,7 +10,7 @@
 [![Open in Kaggle](https://kaggle.com/static/images/open-in-kaggle.svg)](https://kaggle.com/kernels/welcome?src=https://github.com/rishiraj/jaxotron/blob/main/notebooks/jaxotron_tour.ipynb)
 
 **Minimal, hackable 4D-parallel LLM pre-training and inference in pure JAX.**
-Data, Tensor (+ Sequence), Pipeline, and Context parallelism (plus FSDP/ZeRO-3) for **Llama 3.x**, **Qwen3**, **Qwen2.5**, and **SmolLM2** models in ~1,000 lines of readable code. Runs on a laptop CPU (with simulated devices), a multi-GPU node, or a TPU pod, and loads real Hugging Face `.safetensors` weights with zero PyTorch dependency.
+Data, Tensor (+ Sequence), Pipeline, and Context parallelism (plus FSDP/ZeRO-3) for **Llama 3.x**, **Qwen3**, **Qwen2.5**, and **SmolLM2** models in ~2,500 lines of readable code (the parallelism core in parallel/ is under 400). Runs on a laptop CPU (with simulated devices), a multi-GPU node, or a TPU pod, and loads real Hugging Face `.safetensors` weights with zero PyTorch dependency.
 
 Inspired by Hugging Face's [Picotron](https://github.com/huggingface/picotron) / [Nanotron](https://github.com/huggingface/nanotron) and Google DeepMind's [How to Scale Your Model](https://jax-ml.github.io/scaling-book/).
 
@@ -35,7 +35,7 @@ jaxotron-compare --cpu_devices 16                                               
 | **Checkpoints** | One file per `(tp, pp)` rank; requires identical topology to resume | Topology-independent (Orbax): train on 16 devices, resume on 2, sample on 1 |
 | **Runs on** | GPUs (or slow `gloo` processes) | GPUs, TPUs, and single-process simulated CPU devices (`--cpu_devices N`) |
 
-Every parallel layout is **tested to produce the exact same loss and gradients as a single device**, and pretrained checkpoints (`Llama`, `SmolLM2`, `Qwen3`, `Qwen2.5`) are **tested to produce the exact same logits as reference implementations**.
+Every parallel layout is **tested to produce the same loss and gradients to float32 round-off (< 1e‑5) as a single device**, and pretrained checkpoints (`Llama`, `SmolLM2`, `Qwen3`, `Qwen2.5`) are **tested to produce the exact same logits as reference implementations**.
 
 ---
 

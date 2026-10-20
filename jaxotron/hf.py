@@ -4,9 +4,10 @@
     params, cfg = load_hf_llama("Qwen/Qwen3-0.6B", mesh)
 
 Weights go straight from the safetensors files on disk into their *sharded*
-layout: each device only receives the slices it owns, and with pipeline
-parallelism (`pp > 1`) each host only reads from disk the layers belonging to
-its own pipeline stages.
+layout. Every parameter is assembled lazily, one Hugging Face tensor at a time,
+and only for the slices that local devices own: with pipeline parallelism
+(`pp > 1`) a host only reads the layers of its own stages, and on multi-host
+setups each host only touches the shards of its own devices.
 
 Safetensors files are parsed with NumPy (8-byte header length + JSON header +
 raw little-endian data), so no PyTorch or `safetensors` package is required.
@@ -19,6 +20,7 @@ import json
 import os
 import struct
 from collections.abc import Callable
+from typing import Optional
 
 import numpy as np
 
@@ -71,7 +73,7 @@ def hf_model_config(path: str) -> ModelConfig:
     explicit_hd = int(c.get("head_dim") or default_hd)
     attn_head_dim = explicit_hd if explicit_hd != default_hd else 0
 
-    rope_params = c.get("rope_parameters") or {}
+    rope_params = c.get("rope_parameters") or {}  # transformers v5 layout
     rope_theta = float(c.get("rope_theta", rope_params.get("rope_theta", 10000.0)))
 
     rope = {}
@@ -128,7 +130,7 @@ def safetensors_index(path: str) -> dict[str, Callable[[], np.ndarray]]:
         with open(file, "rb") as f:
             n = struct.unpack("<Q", f.read(8))[0]
             header = json.loads(f.read(n))
-        data = np.memmap(file, dtype=np.uint8, mode="r", offset=8 + n)
+        data = np.memmap(file, dtype=np.uint8, mode="r", offset=8 + n)  # nothing is read until a loader runs
         for name, info in header.items():
             if name == "__metadata__":
                 continue
@@ -147,8 +149,47 @@ def _loader(data: np.ndarray, info: dict) -> Callable[[], np.ndarray]:
     return load
 
 
-def hf_to_jaxotron(path: str, cfg: ModelConfig) -> dict[str, Callable[[], np.ndarray]]:
-    """Builders for every Jaxotron parameter (by field name), in Jaxotron's layout, from HF tensors."""
+class LazyParam:
+    """One Jaxotron parameter, assembled from Hugging Face tensors only where a device needs it.
+
+    Call it with a device's index (a tuple of slices, as given by
+    jax.make_array_from_callback) and the full parameter shape. Stacked
+    parameters ([num_layers, ...]) only load the layers in that index, so a
+    pipeline stage never reads another stage's layers from disk.
+    """
+
+    def __init__(self, name: str, load: Callable, num_layers: Optional[int] = None):
+        self.name, self._load, self._n = name, load, num_layers
+        self._cache: dict = {}
+
+    def _tensor(self, layer: Optional[int]) -> np.ndarray:
+        if layer not in self._cache:  # several tensor-parallel shards reuse the same layer
+            self._cache[layer] = self._load() if layer is None else self._load(layer)
+        return self._cache[layer]
+
+    def _check(self, got, want, where: str = "") -> None:
+        if tuple(got) != tuple(want):
+            raise ValueError(f"{self.name}{where}: checkpoint shape {tuple(got)} != model shape {tuple(want)}.")
+
+    def __call__(self, index: tuple, shape: tuple) -> np.ndarray:
+        if self._n is None:
+            full = self._tensor(None)
+            self._check(full.shape, shape)
+            return full[index]
+        self._check((self._n,), shape[:1], " (number of layers)")
+        rows = []
+        for i in range(self._n)[index[0]]:
+            w = self._tensor(i)
+            self._check(w.shape, shape[1:], f" (layer {i})")
+            rows.append(w[index[1:]])
+        return np.stack(rows)
+
+    def clear(self) -> None:
+        self._cache.clear()
+
+
+def hf_to_jaxotron(path: str, cfg: ModelConfig) -> dict[str, LazyParam]:
+    """A LazyParam for every Jaxotron parameter (by field name), in Jaxotron's layout, from HF tensors."""
     st = safetensors_index(path)
     d, h, kv, hd, n = (
         cfg.hidden_size,
@@ -164,14 +205,17 @@ def hf_to_jaxotron(path: str, cfg: ModelConfig) -> dict[str, Callable[[], np.nda
                 return st[key]()
         raise KeyError(f"Tensor {name!r} not found in checkpoint {path}.")
 
-    def stacked(component: str, convert: Callable[[np.ndarray], np.ndarray], suffix: str = "weight") -> Callable[[], np.ndarray]:
-        return lambda: np.stack([convert(get(f"model.layers.{i}.{component}.{suffix}")) for i in range(n)])
+    def single(load: Callable[[], np.ndarray]):
+        return lambda name: LazyParam(name, load)
+
+    def stacked(component: str, convert: Callable[[np.ndarray], np.ndarray], suffix: str = "weight"):
+        return lambda name: LazyParam(name, lambda i: convert(get(f"model.layers.{i}.{component}.{suffix}")), n)
 
     tied = _tied_embeddings(path) or not any(k.endswith("lm_head.weight") for k in st)
-    builders = {
-        "embed": lambda: get("model.embed_tokens.weight"),                                  # [V, D]
-        "lm_head": (lambda: get("model.embed_tokens.weight").T) if tied else (lambda: get("lm_head.weight").T),
-        "final_norm": lambda: get("model.norm.weight"),
+    makers = {
+        "embed": single(lambda: get("model.embed_tokens.weight")),                          # [V, D]
+        "lm_head": single((lambda: get("model.embed_tokens.weight").T) if tied else (lambda: get("lm_head.weight").T)),
+        "final_norm": single(lambda: get("model.norm.weight")),
         "attn_norm": stacked("input_layernorm", lambda w: w),
         "mlp_norm": stacked("post_attention_layernorm", lambda w: w),
         "wq": stacked("self_attn.q_proj", lambda w: w.T.reshape(d, h, hd)),                 # [H*Dh, D] -> [D, H, Dh]
@@ -183,13 +227,13 @@ def hf_to_jaxotron(path: str, cfg: ModelConfig) -> dict[str, Callable[[], np.nda
         "w_down": stacked("mlp.down_proj", lambda w: w.T),                                  # [D, F] -> [F, D]
     }
     if cfg.qk_norm:
-        builders["q_norm"] = stacked("self_attn.q_norm", lambda w: w)
-        builders["k_norm"] = stacked("self_attn.k_norm", lambda w: w)
+        makers["q_norm"] = stacked("self_attn.q_norm", lambda w: w)
+        makers["k_norm"] = stacked("self_attn.k_norm", lambda w: w)
     if cfg.qkv_bias:
-        builders["bq"] = stacked("self_attn.q_proj", lambda b: b.reshape(h, hd), suffix="bias")
-        builders["bk"] = stacked("self_attn.k_proj", lambda b: b.reshape(kv, hd), suffix="bias")
-        builders["bv"] = stacked("self_attn.v_proj", lambda b: b.reshape(kv, hd), suffix="bias")
-    return builders
+        makers["bq"] = stacked("self_attn.q_proj", lambda b: b.reshape(h, hd), suffix="bias")
+        makers["bk"] = stacked("self_attn.k_proj", lambda b: b.reshape(kv, hd), suffix="bias")
+        makers["bv"] = stacked("self_attn.v_proj", lambda b: b.reshape(kv, hd), suffix="bias")
+    return {name: make(name) for name, make in makers.items()}
 
 
 def load_hf_llama(name_or_path: str, mesh, cfg: ModelConfig | None = None):
@@ -201,15 +245,19 @@ def load_hf_llama(name_or_path: str, mesh, cfg: ModelConfig | None = None):
 
     path = resolve_hf_path(name_or_path)
     cfg = cfg or hf_model_config(path)
-    builders = hf_to_jaxotron(path, cfg)
+    lazy = hf_to_jaxotron(path, cfg)
     params_abs, _, _ = abstract_model(cfg, mesh)
 
     def materialise(p, leaf):
-        arr = builders[leaf_name(p)]()
-        if arr.shape != leaf.shape:
-            raise ValueError(f"{leaf_name(p)}: checkpoint shape {arr.shape} != model shape {leaf.shape}.")
-        arr = np.ascontiguousarray(arr, dtype=np.float32)
-        return jax.make_array_from_callback(leaf.shape, leaf.sharding, lambda idx: arr[idx])
+        param = lazy[leaf_name(p)]
+
+        def shard(index):  # called once per addressable device, only for the slice it owns
+            return np.ascontiguousarray(param(index, leaf.shape), dtype=np.float32)
+
+        try:
+            return jax.make_array_from_callback(leaf.shape, leaf.sharding, shard)
+        finally:
+            param.clear()  # free host memory before the next parameter
 
     params = jax.tree_util.tree_map_with_path(materialise, params_abs)
     return params, cfg

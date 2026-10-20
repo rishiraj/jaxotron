@@ -1,6 +1,7 @@
 #!/bin/bash
 # Multi-node GPU training with SLURM. One process per node; JAX sees all local GPUs.
-# Submit: sbatch scripts/slurm.sbatch
+# Submit (SLURM opens the --output file before this script runs, so logs/ must already exist):
+#   mkdir -p logs && sbatch scripts/slurm.sbatch
 # Prepare data once on shared storage first:
 #   jaxotron-prepare-data --dataset roneneldan/TinyStories --out_dir data/tinystories
 #SBATCH --job-name=jaxotron
@@ -12,7 +13,6 @@
 #SBATCH --output=logs/%x_%j.out
 
 set -euo pipefail
-mkdir -p logs
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
 export JAXOTRON_CHECKPOINT_DIR=${JAXOTRON_CHECKPOINT_DIR:-checkpoints/125m}
 
