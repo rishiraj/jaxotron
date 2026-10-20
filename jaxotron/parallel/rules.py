@@ -27,13 +27,19 @@ WEIGHT_RULES: dict[str, object] = {
 ACTIVATION_RULES: dict[str, object] = {
     "batch": ("dp", "fsdp"),  # Data parallel: batch split across dp and fsdp
     "seq": "cp",              # Context parallel: sequence split
+    "res_seq": "cp",          # Residual stream sequence axis: "cp", or ("cp", "tp") with --sp
     "kv_seq": None,           # Keys/values are all-gathered across cp (all-gather context parallelism)
     "stage": "pp",            # Pipeline parallel: the pipeline state buffer has one slot per stage
     "heads": "tp",
     "kv_heads": "tp",
     "mlp": "tp",
     "vocab": "tp",
-    "act_embed": None,        # Residual stream is replicated over tp (Megatron style)
+    "act_embed": None,        # Residual hidden dim is replicated over tp (Megatron style)
+}
+
+ACTIVATION_RULES_SP: dict[str, object] = {
+    **ACTIVATION_RULES,
+    "res_seq": ("cp", "tp"),  # Megatron-style Sequence Parallelism: shard residual stream over tp too
 }
 
 # Logical axes of every parameter, keyed by its field name in the model.
@@ -43,9 +49,14 @@ PARAM_LOGICAL_AXES: dict[str, tuple] = {
     "final_norm": (None,),
     "attn_norm": ("layers", None),
     "mlp_norm": ("layers", None),
+    "q_norm": ("layers", None),
+    "k_norm": ("layers", None),
     "wq": ("layers", "embed", "heads", None),
     "wk": ("layers", "embed", "kv_heads", None),
     "wv": ("layers", "embed", "kv_heads", None),
+    "bq": ("layers", "heads", None),
+    "bk": ("layers", "kv_heads", None),
+    "bv": ("layers", "kv_heads", None),
     "wo": ("layers", "heads", None, "embed"),
     "w_gate": ("layers", "embed", "mlp"),
     "w_up": ("layers", "embed", "mlp"),

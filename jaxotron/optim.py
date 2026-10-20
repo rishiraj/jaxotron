@@ -10,17 +10,23 @@ from jaxotron.config import TrainConfig
 from jaxotron.parallel.rules import leaf_name
 
 
-def build_optimizer(tcfg: TrainConfig, params) -> tuple[optax.GradientTransformation, optax.Schedule]:
-    warmup = min(tcfg.warmup_steps, max(tcfg.train_steps - 1, 0))
+def _use_weight_decay(path, _) -> bool:
+    """Exclude RMSNorm gains (attn_norm, mlp_norm, final_norm, q_norm, k_norm) and biases (bq, bk, bv)."""
+    name = leaf_name(path)
+    return not name.endswith("norm") and name not in ("bq", "bk", "bv")
+
+
+def build_optimizer(tcfg: TrainConfig, params, total_steps: int | None = None) -> tuple[optax.GradientTransformation, optax.Schedule]:
+    steps = total_steps if total_steps is not None else tcfg.train_steps
+    warmup = min(tcfg.warmup_steps, max(steps - 1, 0))
     schedule = optax.warmup_cosine_decay_schedule(
         init_value=0.0,
         peak_value=tcfg.learning_rate,
         warmup_steps=warmup,
-        decay_steps=max(tcfg.train_steps, warmup + 1),
+        decay_steps=max(steps, warmup + 1),
         end_value=tcfg.learning_rate * tcfg.min_lr_ratio,
     )
-    # No weight decay on normalisation gains.
-    decay_mask = jax.tree_util.tree_map_with_path(lambda path, _: not leaf_name(path).endswith("norm"), params)
+    decay_mask = jax.tree_util.tree_map_with_path(_use_weight_decay, params)
     optimizer = optax.chain(
         optax.clip_by_global_norm(tcfg.grad_clip),
         optax.adamw(schedule, b1=tcfg.beta1, b2=tcfg.beta2, eps=1e-8,

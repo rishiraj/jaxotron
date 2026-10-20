@@ -4,10 +4,10 @@
 
 prints something like
 
-    collective           mesh axes     ops   bytes (static)
-    all-reduce           tp             17      1.31 MiB
-    all-reduce           dp             12    330.00 KiB
-    collective-permute   pp              2    256.00 KiB
+    collective           mesh axes      ops   bytes (static)
+    all-reduce           tp              17      1.31 MiB
+    all-reduce           dp              12    330.00 KiB
+    collective-permute   pp               2    256.00 KiB
 
 Each collective's replica groups (or source/target pairs) are mapped back to
 mesh coordinates; the "mesh axes" column lists the axes along which members of
@@ -38,10 +38,10 @@ _BYTES = {"pred": 1, "s8": 1, "u8": 1, "s16": 2, "u16": 2, "bf16": 2, "f16": 2,
 
 def _parse_groups(line: str) -> list[list[int]]:
     m = _GROUPS_MESH_RE.search(line)
-    if m:  # newer XLA: mesh['a'=2,'b'=4] {'b'} = groups along the listed axes of a device grid
-        dims = re.findall(r"'([^']+)'=(\d+)", m.group(1))
+    if m:  # newer XLA / Shardy: mesh['a'=2,'b'=4] {'b'} = groups along the listed axes of a device grid
+        dims = re.findall(r"['\"]?([a-zA-Z0-9_]+)['\"]?=(\d+)", m.group(1))
         names, sizes = [n for n, _ in dims], [int(s) for _, s in dims]
-        selected = [names.index(a) for a in re.findall(r"'([^']+)'", m.group(2)) if a in names]
+        selected = [names.index(a) for a in re.findall(r"['\"]?([a-zA-Z0-9_]+)['\"]?", m.group(2)) if a in names]
         ids = np.arange(int(np.prod(sizes))).reshape(sizes)
         rest = [i for i in range(len(sizes)) if i not in selected]
         group_size = int(np.prod([sizes[i] for i in selected])) if selected else 1

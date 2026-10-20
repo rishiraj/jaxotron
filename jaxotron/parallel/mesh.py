@@ -33,6 +33,14 @@ def create_mesh(pcfg: ParallelConfig, devices=None) -> Mesh:
             device_array = None
     if device_array is None:
         device_array = np.asarray(devices, dtype=object).reshape(shape)
+    # Explicit AxisType.Auto ensures forward compatibility with JAX 0.9+ where
+    # helper functions like jax.make_mesh changed defaults toward AxisType.Explicit.
+    axis_types = getattr(jax.sharding, "AxisType", None)
+    if axis_types is not None and hasattr(axis_types, "Auto"):
+        try:
+            return Mesh(device_array, MESH_AXES, axis_types=(axis_types.Auto,) * len(MESH_AXES))
+        except TypeError:
+            pass
     return Mesh(device_array, MESH_AXES)
 
 

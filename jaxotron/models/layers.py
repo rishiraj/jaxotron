@@ -1,4 +1,4 @@
-"""Llama building blocks: RMSNorm, rotary embeddings and causal GQA attention."""
+"""Llama / Qwen3 / SmolLM2 building blocks: RMSNorm, rotary embeddings and causal GQA attention."""
 from __future__ import annotations
 
 import math
@@ -9,7 +9,7 @@ import jax.numpy as jnp
 
 
 def rms_norm(x: jax.Array, weight: jax.Array, eps: float) -> jax.Array:
-    """RMSNorm computed in float32 for stability (matches Hugging Face LlamaRMSNorm)."""
+    """RMSNorm computed in float32 for stability (matches Hugging Face LlamaRMSNorm / Qwen3RMSNorm)."""
     dtype = x.dtype
     x32 = x.astype(jnp.float32)
     x32 = x32 * jax.lax.rsqrt(jnp.mean(jnp.square(x32), axis=-1, keepdims=True) + eps)
@@ -44,7 +44,7 @@ def rope_tables(seq_len: int, head_dim: int, theta: float,
 
 
 def apply_rope(x: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
-    """Rotary embedding with the "rotate half" convention used by Hugging Face Llama.
+    """Rotary embedding with the "rotate half" convention used by Hugging Face Llama / Qwen.
 
     x: [batch, seq, heads, head_dim]
     """
@@ -57,7 +57,13 @@ def apply_rope(x: jax.Array, cos: jax.Array, sin: jax.Array) -> jax.Array:
     return out.astype(dtype)
 
 
-def causal_attention(q: jax.Array, k: jax.Array, v: jax.Array, impl: str = "reference") -> jax.Array:
+def causal_attention(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    impl: str = "reference",
+    pos_offset: Optional[jax.Array] = None,
+) -> jax.Array:
     """Causal grouped-query attention.
 
     q: [B, T, H, D]   k, v: [B, S, K, D]   with H a multiple of K.
@@ -66,16 +72,17 @@ def causal_attention(q: jax.Array, k: jax.Array, v: jax.Array, impl: str = "refe
     The reference implementation is written with plain einsums so GSPMD can
     partition it along any axis (batch, heads, and query sequence for context
     parallelism). Positions are global, so the causal mask stays correct when
-    the sequence is sharded.
+    the sequence is sharded or when decoding from a KV cache (via `pos_offset`).
     """
-    if impl == "cudnn":
+    if impl == "cudnn" and pos_offset is None:
         return jax.nn.dot_product_attention(q, k, v, is_causal=True, implementation="cudnn")
 
     b, t, h, d = q.shape
     s, kv = k.shape[1], k.shape[2]
     q = q.reshape(b, t, kv, h // kv, d)  # query head h uses kv head h // (H/K), like HF repeat_kv
     scores = jnp.einsum("btkgd,bskd->bkgts", q, k, preferred_element_type=jnp.float32) * (d ** -0.5)
-    mask = jnp.arange(t)[:, None] >= jnp.arange(s)[None, :]
+    q_pos = jnp.arange(t)[:, None] if pos_offset is None else (pos_offset + jnp.arange(t)[:, None])
+    mask = q_pos >= jnp.arange(s)[None, :]
     scores = jnp.where(mask, scores, jnp.finfo(jnp.float32).min)
     probs = jax.nn.softmax(scores, axis=-1).astype(v.dtype)
     out = jnp.einsum("bkgts,bskd->btkgd", probs, v)

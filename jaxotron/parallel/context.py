@@ -8,7 +8,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 
-from jaxotron.parallel.rules import ACTIVATION_RULES, logical_to_spec
+from jaxotron.parallel.rules import ACTIVATION_RULES, ACTIVATION_RULES_SP, logical_to_spec
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,7 @@ class ParallelContext:
     mesh: Optional[Mesh] = None
     pp: int = 1
     pp_microbatches: int = 1
+    sp: bool = False
     dtype: Any = jnp.float32
     remat: str = "full"
     attention_impl: str = "reference"
@@ -26,5 +27,6 @@ class ParallelContext:
             return x
         if len(logical_axes) != x.ndim:
             raise ValueError(f"Got {len(logical_axes)} logical axes {logical_axes} for an array of shape {x.shape}.")
-        spec = logical_to_spec(logical_axes, ACTIVATION_RULES)
+        rules = ACTIVATION_RULES_SP if self.sp else ACTIVATION_RULES
+        spec = logical_to_spec(logical_axes, rules)
         return jax.lax.with_sharding_constraint(x, NamedSharding(self.mesh, spec))

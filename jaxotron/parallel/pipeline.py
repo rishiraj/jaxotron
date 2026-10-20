@@ -64,10 +64,10 @@ def pipeline_apply(stage_fn: Callable, stage_params, x: jax.Array, ctx: Parallel
     """
     num_stages, num_micro = ctx.pp, ctx.pp_microbatches
 
-    inputs = ctx.shard(split_microbatches(x, num_micro), None, "batch", "seq", "act_embed")
+    inputs = ctx.shard(split_microbatches(x, num_micro), None, "batch", "res_seq", "act_embed")
     outputs = jnp.zeros_like(inputs)
     state = jnp.zeros((num_stages,) + inputs.shape[1:], inputs.dtype)
-    state = ctx.shard(state, "stage", "batch", "seq", "act_embed")
+    state = ctx.shard(state, "stage", "batch", "res_seq", "act_embed")
 
     # All stages compute simultaneously; the vmapped axis is sharded over "pp".
     run_all_stages = jax.vmap(stage_fn, spmd_axis_name="pp")
@@ -77,7 +77,7 @@ def pipeline_apply(stage_fn: Callable, stage_params, x: jax.Array, ctx: Parallel
         # 1. Stage 0 receives microbatch i (zeros once all microbatches have entered).
         new_input = jax.lax.dynamic_index_in_dim(inputs, jnp.minimum(i, num_micro - 1), keepdims=False)
         new_input = jnp.where(i < num_micro, new_input, jnp.zeros_like(new_input))
-        state = ctx.shard(state.at[0].set(new_input), "stage", "batch", "seq", "act_embed")
+        state = ctx.shard(state.at[0].set(new_input), "stage", "batch", "res_seq", "act_embed")
 
         # 2. Every stage processes its slot in parallel.
         state = run_all_stages(stage_params, state)
@@ -90,7 +90,7 @@ def pipeline_apply(stage_fn: Callable, stage_params, x: jax.Array, ctx: Parallel
         outputs = jax.lax.dynamic_update_index_in_dim(outputs, finished, safe_idx, axis=0)
 
         # 4. Send activations to the next stage (lowered to a collective-permute).
-        state = ctx.shard(jnp.roll(state, shift=1, axis=0), "stage", "batch", "seq", "act_embed")
+        state = ctx.shard(jnp.roll(state, shift=1, axis=0), "stage", "batch", "res_seq", "act_embed")
         return (state, outputs), None
 
     (_, outputs), _ = jax.lax.scan(iteration, (state, outputs), jnp.arange(num_micro + num_stages - 1))

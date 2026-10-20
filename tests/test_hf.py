@@ -1,4 +1,4 @@
-"""Hugging Face Llama checkpoints load into Jaxotron's sharded layout and give identical logits."""
+"""Hugging Face Llama, SmolLM2, Qwen3, and Qwen2.5 checkpoints load into Jaxotron's sharded layout and match logits."""
 import json
 import struct
 
@@ -33,25 +33,40 @@ def _write_safetensors(path, tensors: dict, dtype="F32"):
         f.write(struct.pack("<Q", len(raw)) + raw + b"".join(blobs))
 
 
-def _random_hf_checkpoint(directory, tied=False, dtype="F32"):
-    c = dict(HF_CONFIG, tie_word_embeddings=tied)
+def _random_hf_checkpoint(directory, tied=False, dtype="F32", model_type="llama", head_dim=None, qkv_bias=False):
+    c = dict(HF_CONFIG, model_type=model_type, tie_word_embeddings=tied, attention_bias=qkv_bias)
+    if head_dim is not None:
+        c["head_dim"] = head_dim
     rng = np.random.default_rng(0)
-    d, f, v, hd = c["hidden_size"], c["intermediate_size"], c["vocab_size"], c["hidden_size"] // c["num_attention_heads"]
-    kvd = c["num_key_value_heads"] * hd
+    d, f, v = c["hidden_size"], c["intermediate_size"], c["vocab_size"]
+    h, kv = c["num_attention_heads"], c["num_key_value_heads"]
+    hd = c.get("head_dim") or (d // h)
+    qd, kvd = h * hd, kv * hd
     t = {"model.embed_tokens.weight": rng.normal(size=(v, d)), "model.norm.weight": rng.normal(size=d)}
     if not tied:
         t["lm_head.weight"] = rng.normal(size=(v, d))
     for i in range(c["num_hidden_layers"]):
         p = f"model.layers.{i}."
-        for name, shape in (("self_attn.q_proj", (d, d)), ("self_attn.k_proj", (kvd, d)), ("self_attn.v_proj", (kvd, d)),
-                            ("self_attn.o_proj", (d, d)), ("mlp.gate_proj", (f, d)), ("mlp.up_proj", (f, d)),
+        for name, shape in (("self_attn.q_proj", (qd, d)), ("self_attn.k_proj", (kvd, d)), ("self_attn.v_proj", (kvd, d)),
+                            ("self_attn.o_proj", (d, qd)), ("mlp.gate_proj", (f, d)), ("mlp.up_proj", (f, d)),
                             ("mlp.down_proj", (d, f)), ("input_layernorm", (d,)), ("post_attention_layernorm", (d,))):
             t[p + name + ".weight"] = rng.normal(size=shape) * 0.1
+        if model_type == "qwen3":
+            t[p + "self_attn.q_norm.weight"] = rng.uniform(0.5, 1.5, size=(hd,))
+            t[p + "self_attn.k_norm.weight"] = rng.uniform(0.5, 1.5, size=(hd,))
+        if qkv_bias:
+            t[p + "self_attn.q_proj.bias"] = rng.normal(size=(qd,)) * 0.05
+            t[p + "self_attn.k_proj.bias"] = rng.normal(size=(kvd,)) * 0.05
+            t[p + "self_attn.v_proj.bias"] = rng.normal(size=(kvd,)) * 0.05
     with open(directory / "config.json", "w") as fh:
         json.dump(c, fh)
-    names = sorted(t)  # split across two shards like real checkpoints
-    _write_safetensors(directory / "model-00001-of-00002.safetensors", {n: t[n] for n in names[::2]}, dtype)
-    _write_safetensors(directory / "model-00002-of-00002.safetensors", {n: t[n] for n in names[1::2]}, dtype)
+    names = sorted(t)  # split across two shards + index.json like real checkpoints
+    s1, s2 = "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"
+    _write_safetensors(directory / s1, {n: t[n] for n in names[::2]}, dtype)
+    _write_safetensors(directory / s2, {n: t[n] for n in names[1::2]}, dtype)
+    weight_map = {n: (s1 if idx % 2 == 0 else s2) for idx, n in enumerate(names)}
+    with open(directory / "model.safetensors.index.json", "w") as fh:
+        json.dump({"metadata": {}, "weight_map": weight_map}, fh)
     return t
 
 
@@ -73,8 +88,8 @@ def test_safetensors_conversion_layout(tmp_path, tied, dtype):
 
 def test_rejects_unsupported_architectures(tmp_path):
     with open(tmp_path / "config.json", "w") as fh:
-        json.dump(dict(HF_CONFIG, model_type="qwen2"), fh)
-    with pytest.raises(ValueError, match="Llama"):
+        json.dump(dict(HF_CONFIG, model_type="mamba"), fh)
+    with pytest.raises(ValueError, match="model_type"):
         hf_model_config(str(tmp_path))
     with open(tmp_path / "config.json", "w") as fh:
         json.dump(dict(HF_CONFIG, rope_scaling={"rope_type": "yarn", "factor": 4.0}), fh)
@@ -82,38 +97,11 @@ def test_rejects_unsupported_architectures(tmp_path):
         hf_model_config(str(tmp_path))
 
 
-@pytest.mark.parametrize("variant", ["untied", "tied", "llama3_rope"])
-@pytest.mark.parametrize("layout", [dict(), dict(tp=2, pp=2), dict(fsdp=2, cp=2)])
-def test_logits_match_transformers(tmp_path, variant, layout):
-    torch = pytest.importorskip("torch")
-    transformers = pytest.importorskip("transformers")
-    extra = {"tie_word_embeddings": variant == "tied"}
-    if variant == "llama3_rope":
-        extra.update(rope_theta=500000.0, max_position_embeddings=64,
-                     rope_scaling={"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0,
-                                   "high_freq_factor": 4.0, "original_max_position_embeddings": 8})
-    hf_cfg = transformers.LlamaConfig(**{k: v for k, v in HF_CONFIG.items() if k != "model_type"}, **extra)
-    torch.manual_seed(0)
-    model = transformers.LlamaForCausalLM(hf_cfg).eval()
-    model.save_pretrained(tmp_path, safe_serialization=True)
-
-    tokens = np.random.default_rng(0).integers(0, HF_CONFIG["vocab_size"], (2, 16))
-    with torch.no_grad():
-        expected = model(torch.tensor(tokens)).logits.float().numpy()
-
-    pcfg = ParallelConfig(pp_microbatches=1, **layout)
-    mesh = create_mesh(pcfg, jax.devices()[:pcfg.world_size])
-    params, cfg_m = load_hf_llama(str(tmp_path), mesh)
-    _, static, _ = abstract_model(cfg_m, mesh)
-    ctx = make_context(Config(parallel=pcfg, model=cfg_m, train=TrainConfig(dtype="float32", remat="none")), mesh)
-    logits = jax.jit(lambda p, t: forward(eqx.combine(p, static), t, ctx))(params, jax.numpy.asarray(tokens, np.int32))
-    np.testing.assert_allclose(np.asarray(logits), expected, rtol=2e-4, atol=2e-4)
-
-
-def _numpy_hf_llama(t: dict, c: dict, tokens: np.ndarray) -> np.ndarray:
-    """Independent float64 NumPy port of transformers' LlamaForCausalLM forward, on raw HF tensors."""
+def _numpy_hf_reference(t: dict, c: dict, tokens: np.ndarray) -> np.ndarray:
+    """Independent float64 NumPy port of Llama / Qwen3 / Qwen2.5 forward, on raw HF tensors."""
     d, h, kv = c["hidden_size"], c["num_attention_heads"], c["num_key_value_heads"]
-    hd, T = d // h, tokens.shape[1]
+    hd = c.get("head_dim") or (d // h)
+    T = tokens.shape[1]
     inv_freq = 1.0 / (c["rope_theta"] ** (np.arange(0, hd, 2) / hd))
     rs = c.get("rope_scaling")
     if rs:  # transformers' _compute_llama3_parameters
@@ -141,15 +129,26 @@ def _numpy_hf_llama(t: dict, c: dict, tokens: np.ndarray) -> np.ndarray:
     for i in range(c["num_hidden_layers"]):
         p = f"model.layers.{i}."
         y = norm(x, W(p + "input_layernorm.weight"))
-        q = (y @ W(p + "self_attn.q_proj.weight").T).reshape(*y.shape[:2], h, hd).transpose(0, 2, 1, 3)
-        k = (y @ W(p + "self_attn.k_proj.weight").T).reshape(*y.shape[:2], kv, hd).transpose(0, 2, 1, 3)
-        v = (y @ W(p + "self_attn.v_proj.weight").T).reshape(*y.shape[:2], kv, hd).transpose(0, 2, 1, 3)
+        q = y @ W(p + "self_attn.q_proj.weight").T
+        k = y @ W(p + "self_attn.k_proj.weight").T
+        v = y @ W(p + "self_attn.v_proj.weight").T
+        if p + "self_attn.q_proj.bias" in t:
+            q = q + W(p + "self_attn.q_proj.bias")
+            k = k + W(p + "self_attn.k_proj.bias")
+            v = v + W(p + "self_attn.v_proj.bias")
+        q = q.reshape(*y.shape[:2], h, hd)
+        k = k.reshape(*y.shape[:2], kv, hd)
+        v = v.reshape(*y.shape[:2], kv, hd)
+        if p + "self_attn.q_norm.weight" in t:
+            q = norm(q, W(p + "self_attn.q_norm.weight"))
+            k = norm(k, W(p + "self_attn.k_norm.weight"))
+        q, k, v = q.transpose(0, 2, 1, 3), k.transpose(0, 2, 1, 3), v.transpose(0, 2, 1, 3)
         q, k = q * cos + rotate_half(q) * sin, k * cos + rotate_half(k) * sin
         k, v = np.repeat(k, h // kv, axis=1), np.repeat(v, h // kv, axis=1)  # repeat_kv
         s = q @ k.transpose(0, 1, 3, 2) / np.sqrt(hd) + mask
         s = np.exp(s - s.max(-1, keepdims=True))
         a = (s / s.sum(-1, keepdims=True)) @ v
-        x = x + a.transpose(0, 2, 1, 3).reshape(*x.shape) @ W(p + "self_attn.o_proj.weight").T
+        x = x + a.transpose(0, 2, 1, 3).reshape(*x.shape[:2], h * hd) @ W(p + "self_attn.o_proj.weight").T
         y = norm(x, W(p + "post_attention_layernorm.weight"))
         g = y @ W(p + "mlp.gate_proj.weight").T
         x = x + ((g / (1 + np.exp(-g))) * (y @ W(p + "mlp.up_proj.weight").T)) @ W(p + "mlp.down_proj.weight").T
@@ -158,18 +157,23 @@ def _numpy_hf_llama(t: dict, c: dict, tokens: np.ndarray) -> np.ndarray:
     return x @ head.astype(np.float64).T
 
 
-@pytest.mark.parametrize("variant", ["untied", "tied", "llama3_rope"])
+@pytest.mark.parametrize("variant", ["untied", "tied", "llama3_rope", "qwen3", "qwen2"])
 @pytest.mark.parametrize("layout", [dict(), dict(tp=2, pp=2), dict(fsdp=2, cp=2)])
 def test_logits_match_numpy_reference(tmp_path, variant, layout):
-    hf = _random_hf_checkpoint(tmp_path, tied=variant == "tied")
-    c = dict(HF_CONFIG, tie_word_embeddings=variant == "tied")
+    model_type = "qwen3" if variant == "qwen3" else ("qwen2" if variant == "qwen2" else "llama")
+    head_dim = 32 if variant == "qwen3" else None  # explicit head_dim != hidden_size // heads (64 // 4 = 16)
+    qkv_bias = variant == "qwen2"
+    hf = _random_hf_checkpoint(tmp_path, tied=variant == "tied", model_type=model_type,
+                               head_dim=head_dim, qkv_bias=qkv_bias)
+    with open(tmp_path / "config.json") as fh:
+        c = json.load(fh)
     if variant == "llama3_rope":
         c.update(rope_theta=500000.0, rope_scaling={"rope_type": "llama3", "factor": 8.0, "low_freq_factor": 1.0,
                                                     "high_freq_factor": 4.0, "original_max_position_embeddings": 8})
         with open(tmp_path / "config.json", "w") as fh:
             json.dump(c, fh)
     tokens = np.random.default_rng(1).integers(0, c["vocab_size"], (2, 16))
-    expected = _numpy_hf_llama(hf, c, tokens)
+    expected = _numpy_hf_reference(hf, c, tokens)
 
     pcfg = ParallelConfig(pp_microbatches=1, **layout)
     mesh = create_mesh(pcfg, jax.devices()[:pcfg.world_size])

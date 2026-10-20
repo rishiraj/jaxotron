@@ -20,6 +20,7 @@ class ParallelConfig:
     pp   : pipeline parallel    (layers split into stages)
     cp   : context parallel     (sequence split across devices)
     tp   : tensor parallel      (attention heads / MLP columns split across devices)
+    sp   : sequence parallel    (with tp > 1: residual stream & norms sharded along sequence over tp)
     """
 
     dp: int = 1
@@ -27,6 +28,7 @@ class ParallelConfig:
     pp: int = 1
     cp: int = 1
     tp: int = 1
+    sp: bool = False          # Megatron-style sequence parallelism over the tp axis
     pp_microbatches: int = 0  # 0 = auto (equal to micro_batch_size)
 
     @property
@@ -37,8 +39,19 @@ class ParallelConfig:
     def data_parallel_size(self) -> int:
         return self.dp * self.fsdp
 
+    @property
+    def sequence_shard_size(self) -> int:
+        return self.cp * (self.tp if self.sp else 1)
+
     def describe(self) -> str:
-        active = [f"{n.upper()}={getattr(self, n)}" for n in ("dp", "fsdp", "pp", "cp", "tp") if getattr(self, n) > 1]
+        active = []
+        for n in ("dp", "fsdp", "pp", "cp", "tp"):
+            val = getattr(self, n)
+            if val > 1:
+                label = f"{n.upper()}={val}"
+                if n == "tp" and self.sp:
+                    label += "(+SP)"
+                active.append(label)
         return " x ".join(active) if active else "single device"
 
 
@@ -58,17 +71,21 @@ class ModelConfig:
     rope_low_freq_factor: float = 1.0
     rope_high_freq_factor: float = 4.0
     rope_original_max_position: int = 8192
+    # Qwen3 / Qwen2.5 extensions (0 / False = standard Llama / SmolLM2):
+    attn_head_dim: int = 0   # 0 = hidden_size // num_attention_heads (Qwen3 uses 128)
+    qk_norm: bool = False    # Per-head RMSNorm on Q and K before RoPE (Qwen3)
+    qkv_bias: bool = False   # Bias on Q, K, V projections (Qwen2 / Qwen2.5)
 
     @property
     def head_dim(self) -> int:
-        return self.hidden_size // self.num_attention_heads
+        return self.attn_head_dim or (self.hidden_size // self.num_attention_heads)
 
 
 _LLAMA3_ROPE = dict(rope_theta=500000.0, rope_low_freq_factor=1.0, rope_high_freq_factor=4.0,
                     rope_original_max_position=8192)
 
-# Llama-style architectures. Shapes match the public models, so `--init_from_hf`
-# checkpoints and from-scratch runs share the same code path.
+# Llama, SmolLM2, Qwen3, and Qwen2.5 architectures. Shapes match public Hugging Face checkpoints,
+# so `--init_from_hf` checkpoints and from-scratch runs share the exact same code path.
 MODEL_PRESETS: dict[str, ModelConfig] = {
     "tiny": ModelConfig(),
     "125m": ModelConfig(vocab_size=49152, hidden_size=768, intermediate_size=2048,
@@ -82,6 +99,18 @@ MODEL_PRESETS: dict[str, ModelConfig] = {
     "smollm2-1.7b": ModelConfig(vocab_size=49152, hidden_size=2048, intermediate_size=8192,
                                 num_hidden_layers=24, num_attention_heads=32, num_key_value_heads=32,
                                 rope_theta=130000.0),
+    "qwen2.5-0.5b": ModelConfig(vocab_size=151936, hidden_size=896, intermediate_size=4864,
+                                num_hidden_layers=24, num_attention_heads=14, num_key_value_heads=2,
+                                rms_norm_eps=1e-6, rope_theta=1000000.0, qkv_bias=True),
+    "qwen3-0.6b": ModelConfig(vocab_size=151936, hidden_size=1024, intermediate_size=3072,
+                              num_hidden_layers=28, num_attention_heads=16, num_key_value_heads=8,
+                              attn_head_dim=128, rms_norm_eps=1e-6, rope_theta=1000000.0, qk_norm=True),
+    "qwen3-1.7b": ModelConfig(vocab_size=151936, hidden_size=2048, intermediate_size=6144,
+                              num_hidden_layers=28, num_attention_heads=16, num_key_value_heads=8,
+                              attn_head_dim=128, rms_norm_eps=1e-6, rope_theta=1000000.0, qk_norm=True),
+    "qwen3-4b": ModelConfig(vocab_size=151936, hidden_size=2560, intermediate_size=9728,
+                            num_hidden_layers=36, num_attention_heads=32, num_key_value_heads=8,
+                            attn_head_dim=128, rms_norm_eps=1e-6, rope_theta=1000000.0, qk_norm=True),
     "llama3.2-1b": ModelConfig(vocab_size=128256, hidden_size=2048, intermediate_size=8192,
                                num_hidden_layers=16, num_attention_heads=32, num_key_value_heads=8,
                                rope_scaling_factor=32.0, **_LLAMA3_ROPE),
@@ -100,6 +129,7 @@ class TrainConfig:
     micro_batch_size: int = 4          # sequences per data-parallel replica per forward/backward
     sequence_length: int = 256
     train_steps: int = 300
+    max_tokens: Optional[int] = None   # optional token budget (Picotron style); overrides train_steps if set
     learning_rate: float = 1e-3
     min_lr_ratio: float = 0.1
     warmup_steps: int = 30
@@ -126,7 +156,7 @@ class Config:
     data_path: str = "data/synthetic/train.bin"
     val_path: Optional[str] = None
     checkpoint_dir: str = "checkpoints/run"
-    init_from_hf: Optional[str] = None  # Hugging Face repo id or local dir with Llama safetensors
+    init_from_hf: Optional[str] = None  # Hugging Face repo id or local dir with Llama/Qwen safetensors
     run_name: str = "jaxotron"
     wandb_project: Optional[str] = None
     distributed: bool = False
@@ -149,6 +179,14 @@ class Config:
             return 1
         return self.parallel.pp_microbatches or self.train.micro_batch_size
 
+    @property
+    def total_train_steps(self) -> int:
+        t = self.train
+        if t.max_tokens is not None and t.max_tokens > 0:
+            tokens_per_step = max(1, t.global_batch_size * t.sequence_length)
+            return max(1, (t.max_tokens + tokens_per_step - 1) // tokens_per_step)
+        return t.train_steps
+
     # ------------------------------------------------------------- validation
     def validate(self, num_devices: int) -> None:
         p, m, t = self.parallel, self.model, self.train
@@ -162,6 +200,9 @@ class Config:
         errors += model_errors(m, p)
         if t.sequence_length % p.cp:
             errors.append(f"sequence_length ({t.sequence_length}) must be divisible by cp ({p.cp}).")
+        if p.sp and t.sequence_length % p.sequence_shard_size:
+            errors.append(f"sequence_length ({t.sequence_length}) must be divisible by cp * tp "
+                          f"({p.sequence_shard_size}) when sequence parallelism (--sp) is enabled.")
         if t.micro_batch_size < 1 or t.global_batch_size < 1:
             errors.append("micro_batch_size and global_batch_size must be positive.")
         elif t.global_batch_size % (t.micro_batch_size * p.data_parallel_size):
@@ -215,10 +256,10 @@ class Config:
 def model_errors(m: ModelConfig, p: ParallelConfig) -> list[str]:
     """Shape constraints between the model and the mesh (shared by training and generation)."""
     errors = []
-    if m.hidden_size % m.num_attention_heads:
+    if m.attn_head_dim == 0 and m.hidden_size % m.num_attention_heads:
         errors.append("hidden_size must be divisible by num_attention_heads.")
-    elif m.head_dim % 2:
-        errors.append("head_dim must be even for RoPE.")
+    if m.head_dim <= 0 or m.head_dim % 2:
+        errors.append("head_dim must be positive and even for RoPE.")
     if m.num_attention_heads % m.num_key_value_heads:
         errors.append("num_attention_heads must be divisible by num_key_value_heads (GQA).")
     if m.num_key_value_heads % p.tp:

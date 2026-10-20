@@ -39,8 +39,8 @@ def test_iota_and_list_replica_groups():
     assert _parse_groups("source_target_pairs={{0,1},{1,0}}") == [[0, 1], [1, 0]]
 
 
-@pytest.mark.parametrize("layout, axis", [(dict(dp=2), "dp"), (dict(tp=2), "tp"), (dict(fsdp=2), "fsdp"),
-                                          (dict(cp=2), "cp"), (dict(pp=2), "pp")])
+@pytest.mark.parametrize("layout, axis", [(dict(dp=2), "dp"), (dict(tp=2), "tp"), (dict(tp=2, sp=True), "tp"),
+                                          (dict(fsdp=2), "fsdp"), (dict(cp=2), "cp"), (dict(pp=2), "pp")])
 def test_each_strategy_communicates_over_its_axis(layout, axis):
     assert _axes_used(_collectives(**layout)) == {axis}
 
@@ -58,3 +58,5 @@ def test_mesh_format_replica_groups():
     assert _parse_groups(line) == [[0, 1], [2, 3]]
     line = "all-reduce(x), replica_groups=mesh['dp'=2,'tp'=2] {'dp'}, to_apply=%r"
     assert _parse_groups(line) == [[0, 2], [1, 3]]
+    line = "all-reduce(x), replica_groups=mesh[dp=2,tp=2] {tp}"
+    assert _parse_groups(line) == [[0, 1], [2, 3]]

@@ -19,7 +19,7 @@ pip install -q -e ".[tpu,data]"
 
 python train.py --distributed \
   --preset 125m --data data/tinystories/train.bin \
-  --fsdp 8 --tp 2 \
+  --fsdp 8 --tp 2 --sp \
   --seq_len 2048 --global_batch_size 256 --micro_batch_size 16 \
   --lr 6e-4 --warmup 500 --steps 10000 --eval_every 500 \
   --checkpoint_dir "$CHECKPOINT_DIR"

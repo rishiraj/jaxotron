@@ -10,11 +10,14 @@ import jax
 # Dense bf16 peak FLOP/s per device. Matched as substrings of device_kind, so
 # more specific names come first. Unknown hardware: pass --peak_tflops.
 _PEAK_BF16_FLOPS = [
-    ("gb200", 2450e12), ("b200", 2250e12), ("h100 pcie", 756e12), ("h200", 989e12), ("h100", 989e12),
-    ("h800", 989e12), ("gh200", 989e12), ("a100", 312e12), ("a800", 312e12), ("l40s", 362e12),
-    ("l4", 121e12), ("a10g", 70e12), ("rtx 4090", 165e12), ("mi300x", 1307e12), ("mi250", 362e12),
-    ("tpu v6 lite", 918e12), ("tpu v6e", 918e12), ("tpu v5 lite", 197e12), ("tpu v5e", 197e12),
-    ("tpu v5p", 459e12), ("tpu v5", 459e12), ("tpu v4", 275e12), ("tpu v3", 123e12), ("tpu v2", 45e12),
+    ("gb300", 2500e12), ("b300", 2250e12), ("gb200", 2450e12), ("b200", 2250e12),
+    ("h100 pcie", 756e12), ("h200", 989e12), ("h100", 989e12), ("h800", 989e12), ("gh200", 989e12),
+    ("a100", 312e12), ("a800", 312e12), ("l40s", 362e12), ("l4", 121e12), ("a10g", 70e12),
+    ("rtx 5090", 209.5e12), ("rtx 4090", 165.2e12),
+    ("mi325x", 1307e12), ("mi300x", 1307e12), ("mi250", 362e12),
+    ("tpu7x", 2307e12), ("ironwood", 2307e12), ("tpu v6 lite", 918e12), ("tpu v6e", 918e12), ("trillium", 918e12),
+    ("tpu v5 lite", 197e12), ("tpu v5e", 197e12), ("tpu v5p", 459e12), ("tpu v5", 459e12),
+    ("tpu v4", 275e12), ("tpu v3", 123e12), ("tpu v2", 45e12),
 ]
 
 
@@ -32,6 +35,20 @@ def peak_flops_per_device() -> Optional[float]:
     for name, flops in _PEAK_BF16_FLOPS:
         if name in kind:
             return flops
+    return None
+
+
+def device_memory_gib() -> Optional[float]:
+    """Current or peak bytes in use on local device 0 in GiB (GPU/TPU only; None on CPU)."""
+    if jax.default_backend() == "cpu":
+        return None
+    try:
+        stats = jax.local_devices()[0].memory_stats()
+        if stats:
+            nbytes = stats.get("peak_bytes_in_use") or stats.get("bytes_in_use")
+            return float(nbytes) / (2**30) if nbytes else None
+    except Exception:
+        return None
     return None
 
 
@@ -54,17 +71,26 @@ def human(n: float, unit: str = "") -> str:
     return f"{n:.2f}{unit}"
 
 
-def sharding_table(params) -> str:
+def sharding_table(params, opt_state=None) -> str:
     """Human-readable table: parameter, global shape, PartitionSpec, MB per device."""
     rows = [("parameter", "global shape", "partition spec", "MB/device")]
     total = 0
     for path, leaf in jax.tree_util.tree_flatten_with_path(params)[0]:
+        if leaf is None:
+            continue
         shard_shape = leaf.sharding.shard_shape(leaf.shape)
         nbytes = math.prod(shard_shape) * leaf.dtype.itemsize
         total += nbytes
         spec = getattr(leaf.sharding, "spec", "")
         rows.append((jax.tree_util.keystr(path), str(tuple(leaf.shape)), str(spec), f"{nbytes / 2**20:.2f}"))
     rows.append(("TOTAL (params only)", "", "", f"{total / 2**20:.2f}"))
+    if opt_state is not None:
+        opt_bytes = 0
+        for leaf in jax.tree.leaves(opt_state):
+            if hasattr(leaf, "sharding") and hasattr(leaf, "shape"):
+                s_shape = leaf.sharding.shard_shape(leaf.shape)
+                opt_bytes += math.prod(s_shape) * leaf.dtype.itemsize
+        rows.append(("TOTAL (params + AdamW state)", "", "", f"{(total + opt_bytes) / 2**20:.2f}"))
     widths = [max(len(r[i]) for r in rows) for i in range(4)]
     lines = ["  ".join(c.ljust(w) for c, w in zip(r, widths)) for r in rows]
     lines.insert(1, "-" * len(lines[0]))

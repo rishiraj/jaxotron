@@ -1,30 +1,33 @@
-"""Sample text from a Jaxotron checkpoint or a Hugging Face Llama model.
+"""Sample text from a Jaxotron checkpoint or a Hugging Face Llama / SmolLM2 / Qwen3 / Qwen2.5 model.
 
 The checkpoint can come from ANY parallel layout: Orbax reshards it onto the
 inference mesh here (one device by default, or --tp / --pp / --cp devices).
-This is a simple educational sampler: no KV cache, it re-runs the forward pass
-over a fixed-size buffer for every new token, which is fine for small models.
+Uses a fast KV-cached sampler by default (for single-device and tensor-parallel
+inference), and automatically falls back to full-sequence forward when --pp > 1,
+--cp > 1, or --no_kv_cache is passed.
 
 jaxotron-generate --checkpoint_dir checkpoints/run --prompt "Once upon a time"
 jaxotron-generate --checkpoint_dir checkpoints/run --prompt "5 8 11"            # synthetic data: token ids
 jaxotron-generate --hf HuggingFaceTB/SmolLM2-135M --prompt "Gravity is"        # pretrained weights
-jaxotron-generate --hf HuggingFaceTB/SmolLM2-135M --cpu_devices 3 --tp 3       # tensor-parallel inference
+jaxotron-generate --hf Qwen/Qwen3-0.6B --cpu_devices 4 --tp 4 --prompt "JAX is" # Qwen3 + TP inference
 """
 from __future__ import annotations
 
 import argparse
 import math
 import sys
+import time
 
 from jaxotron.cli.train import setup_cpu_devices
 
 
 def parse_args(argv=None):
-    ap = argparse.ArgumentParser(description="Sample from a Jaxotron checkpoint or a Hugging Face Llama model",
+    ap = argparse.ArgumentParser(description="Sample from a Jaxotron checkpoint or a Hugging Face Llama/Qwen model",
                                  formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     src = ap.add_mutually_exclusive_group()
     src.add_argument("--checkpoint_dir", default="checkpoints/run")
-    src.add_argument("--hf", default=None, metavar="REPO_OR_DIR", help="Hugging Face Llama-family model")
+    src.add_argument("--hf", default=None, metavar="REPO_OR_DIR",
+                     help="Hugging Face Llama / SmolLM2 / Qwen3 / Qwen2.5 model")
     ap.add_argument("--prompt", default="Once upon a time")
     ap.add_argument("--max_new_tokens", type=int, default=64)
     ap.add_argument("--temperature", type=float, default=0.8, help="0 = greedy")
@@ -33,12 +36,32 @@ def parse_args(argv=None):
     ap.add_argument("--tokenizer", default=None, help="Hugging Face tokenizer (default: from the model / dataset)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--dtype", default="auto", choices=["auto", "bfloat16", "float32"])
+    ap.add_argument("--no_kv_cache", action="store_true", help="disable KV cache (re-run full forward per token)")
     ap.add_argument("--cpu", action="store_true", help="run on CPU even if an accelerator is present")
     ap.add_argument("--cpu_devices", type=int, default=0, help="simulate N devices on CPU")
     for axis, desc in (("pp", "pipeline"), ("cp", "context"), ("tp", "tensor")):
         ap.add_argument(f"--{axis}", type=int, default=1, help=f"{desc} parallel size for inference")
     ap.add_argument("--compile_cache", default="~/.cache/jaxotron/xla")
     return ap.parse_args(argv)
+
+
+def _sample_from_logits(logits, valid_vocab: int, temperature: float, top_k: int, top_p: float, key):
+    import jax
+    import jax.numpy as jnp
+
+    logits = jnp.where(jnp.arange(logits.shape[-1]) < valid_vocab, logits, -jnp.inf)  # drop padded vocab
+    if temperature <= 0:
+        return jnp.argmax(logits)
+    logits = logits / temperature
+    if top_k:
+        kth = jax.lax.top_k(logits, min(top_k, logits.shape[-1]))[0][-1]
+        logits = jnp.where(logits < kth, -jnp.inf, logits)
+    if top_p < 1.0:
+        sorted_logits = jnp.sort(logits)[::-1]
+        cumulative = jnp.cumsum(jax.nn.softmax(sorted_logits))
+        cutoff = sorted_logits[jnp.argmax(cumulative >= top_p)]
+        logits = jnp.where(logits < cutoff, -jnp.inf, logits)
+    return jax.random.categorical(key, logits)
 
 
 def main(argv=None):
@@ -57,7 +80,7 @@ def main(argv=None):
     from jaxotron.checkpoint import Checkpointer
     from jaxotron.config import Config, ParallelConfig, TrainConfig, model_errors
     from jaxotron.data.loader import read_meta
-    from jaxotron.models.llama import forward
+    from jaxotron.models.llama import forward, forward_cached, init_kv_cache
     from jaxotron.parallel.mesh import create_mesh
     from jaxotron.trainer import abstract_model, make_context
     from jaxotron.utils import enable_compilation_cache
@@ -81,7 +104,7 @@ def main(argv=None):
         params, _ = load_hf_llama(path, mesh, model_cfg)
         _, static, _ = abstract_model(model_cfg, mesh)
         tok_name = tok_name or path
-        print(f"Loaded {args.hf}", file=sys.stderr)
+        print(f"Loaded {args.hf} ({pcfg.describe()})", file=sys.stderr)
     else:
         cfg = Config.load_json(f"{args.checkpoint_dir.rstrip('/')}/config.json")
         cfg.parallel, cfg.train.dtype, cfg.train.remat = pcfg, args.dtype, "none"
@@ -91,7 +114,7 @@ def main(argv=None):
         params_abs, static, _ = abstract_model(cfg.model, mesh)
         step, params = Checkpointer(args.checkpoint_dir).restore_params(params_abs)
         tok_name = tok_name or read_meta(cfg.data_path).get("tokenizer") or cfg.init_from_hf
-        print(f"Loaded step {step} from {args.checkpoint_dir}", file=sys.stderr)
+        print(f"Loaded step {step} from {args.checkpoint_dir} ({pcfg.describe()})", file=sys.stderr)
 
     ctx = make_context(cfg, mesh)
     model = eqx.combine(params, static)
@@ -116,22 +139,7 @@ def main(argv=None):
     tokens = np.zeros((1, buf_len), np.int32)
     tokens[0, :len(prompt)] = prompt
 
-    @jax.jit
-    def next_token(model, tokens, pos, key):
-        logits = forward(model, tokens, ctx)[0, pos - 1]
-        logits = jnp.where(jnp.arange(logits.shape[-1]) < valid_vocab, logits, -jnp.inf)  # drop padded vocab
-        if args.temperature <= 0:
-            return jnp.argmax(logits)
-        logits = logits / args.temperature
-        if args.top_k:
-            kth = jax.lax.top_k(logits, min(args.top_k, logits.shape[-1]))[0][-1]
-            logits = jnp.where(logits < kth, -jnp.inf, logits)
-        if args.top_p < 1.0:
-            sorted_logits = jnp.sort(logits)[::-1]
-            cumulative = jnp.cumsum(jax.nn.softmax(sorted_logits))
-            cutoff = sorted_logits[jnp.argmax(cumulative >= args.top_p)]
-            logits = jnp.where(logits < cutoff, -jnp.inf, logits)
-        return jax.random.categorical(key, logits)
+    use_kv_cache = not args.no_kv_cache and args.pp == 1 and args.cp == 1
 
     def render(ids):
         return tokenizer.decode(ids, skip_special_tokens=True) if tokenizer else " ".join(map(str, ids))
@@ -141,21 +149,69 @@ def main(argv=None):
     sys.stdout.write(printed)
     sys.stdout.flush()
     end = total
-    for pos in range(len(prompt), total):
-        key, sub = jax.random.split(key)
-        tokens[0, pos] = int(next_token(model, jnp.asarray(tokens), pos, sub))
-        text = render(tokens[0, :pos + 1].tolist())
-        if text.startswith(printed):  # stream only the new characters
-            sys.stdout.write(text[len(printed):] if tokenizer else " " + str(tokens[0, pos]))
-            sys.stdout.flush()
-            printed = text
-        if eos is not None and tokens[0, pos] == eos:
-            end = pos + 1
-            break
+    tic = time.perf_counter()
+
+    if use_kv_cache:
+        cache = init_kv_cache(cfg.model, batch_size=1, max_seq=buf_len, ctx=ctx)
+
+        @jax.jit
+        def prefill_step(model, prompt_arr, cache, key):
+            logits, cache = forward_cached(model, prompt_arr, jnp.int32(0), cache, ctx)
+            tok = _sample_from_logits(logits[0, -1], valid_vocab, args.temperature, args.top_k, args.top_p, key)
+            return tok, cache
+
+        @jax.jit
+        def decode_one(model, tok_arr, pos, cache, key):
+            logits, cache = forward_cached(model, tok_arr, pos, cache, ctx)
+            tok = _sample_from_logits(logits[0, 0], valid_vocab, args.temperature, args.top_k, args.top_p, key)
+            return tok, cache
+
+        prompt_arr = jnp.asarray(np.asarray([prompt], dtype=np.int32))
+        for pos in range(len(prompt), total):
+            key, sub = jax.random.split(key)
+            if pos == len(prompt):
+                next_id, cache = prefill_step(model, prompt_arr, cache, sub)
+                tic = time.perf_counter()  # start decode timer after prefill + compilation
+            else:
+                prev_tok = jnp.asarray([[tokens[0, pos - 1]]], dtype=jnp.int32)
+                next_id, cache = decode_one(model, prev_tok, jnp.int32(pos - 1), cache, sub)
+            tokens[0, pos] = int(next_id)
+            text = render(tokens[0, :pos + 1].tolist())
+            if text.startswith(printed):
+                sys.stdout.write(text[len(printed):] if tokenizer else " " + str(tokens[0, pos]))
+                sys.stdout.flush()
+                printed = text
+            if eos is not None and tokens[0, pos] == eos:
+                end = pos + 1
+                break
+    else:
+        @jax.jit
+        def next_token(model, tokens, pos, key):
+            logits = forward(model, tokens, ctx)[0, pos - 1]
+            return _sample_from_logits(logits, valid_vocab, args.temperature, args.top_k, args.top_p, key)
+
+        for pos in range(len(prompt), total):
+            key, sub = jax.random.split(key)
+            tokens[0, pos] = int(next_token(model, jnp.asarray(tokens), pos, sub))
+            if pos == len(prompt):
+                tic = time.perf_counter()
+            text = render(tokens[0, :pos + 1].tolist())
+            if text.startswith(printed):  # stream only the new characters
+                sys.stdout.write(text[len(printed):] if tokenizer else " " + str(tokens[0, pos]))
+                sys.stdout.flush()
+                printed = text
+            if eos is not None and tokens[0, pos] == eos:
+                end = pos + 1
+                break
+
     final = render(tokens[0, :end].tolist())
     if final != printed:
         sys.stdout.write("\n" + final)
     sys.stdout.write("\n")
+    generated = max(end - len(prompt) - 1, 1)
+    elapsed = max(time.perf_counter() - tic, 1e-6)
+    mode = "KV-cache" if use_kv_cache else "full-sequence"
+    print(f"[{end - len(prompt)} tokens | {generated / elapsed:.1f} tok/s ({mode})]", file=sys.stderr)
 
 
 if __name__ == "__main__":

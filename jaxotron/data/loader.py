@@ -1,10 +1,10 @@
 """Pure NumPy + JAX data pipeline (no PyTorch dependency).
 
-* TokenDataset memory-maps a flat binary file of token ids, so datasets far
+- TokenDataset memory-maps a flat binary file of token ids, so datasets far
   larger than RAM open instantly.
-* The sample order is a pure function of (seed, step): resuming from a
+- The sample order is a pure function of (seed, step): resuming from a
   checkpoint resumes the exact same data stream, on any number of hosts.
-* Batches become *global* jax.Arrays with jax.make_array_from_callback. Each
+- Batches become *global* jax.Arrays with jax.make_array_from_callback. Each
   host reads from disk only the rows that its own devices need, which keeps
   the loader cheap on multi-host GPU clusters and TPU pods.
 """
