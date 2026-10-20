@@ -102,6 +102,9 @@ MODEL_PRESETS: dict[str, ModelConfig] = {
     "qwen2.5-0.5b": ModelConfig(vocab_size=151936, hidden_size=896, intermediate_size=4864,
                                 num_hidden_layers=24, num_attention_heads=14, num_key_value_heads=2,
                                 rms_norm_eps=1e-6, rope_theta=1000000.0, qkv_bias=True),
+    "qwen2.5-1.5b": ModelConfig(vocab_size=151936, hidden_size=1536, intermediate_size=8960,
+                                num_hidden_layers=28, num_attention_heads=12, num_key_value_heads=2,
+                                rms_norm_eps=1e-6, rope_theta=1000000.0, qkv_bias=True),
     "qwen3-0.6b": ModelConfig(vocab_size=151936, hidden_size=1024, intermediate_size=3072,
                               num_hidden_layers=28, num_attention_heads=16, num_key_value_heads=8,
                               attn_head_dim=128, rms_norm_eps=1e-6, rope_theta=1000000.0, qk_norm=True),
@@ -109,6 +112,9 @@ MODEL_PRESETS: dict[str, ModelConfig] = {
                               num_hidden_layers=28, num_attention_heads=16, num_key_value_heads=8,
                               attn_head_dim=128, rms_norm_eps=1e-6, rope_theta=1000000.0, qk_norm=True),
     "qwen3-4b": ModelConfig(vocab_size=151936, hidden_size=2560, intermediate_size=9728,
+                            num_hidden_layers=36, num_attention_heads=32, num_key_value_heads=8,
+                            attn_head_dim=128, rms_norm_eps=1e-6, rope_theta=1000000.0, qk_norm=True),
+    "qwen3-8b": ModelConfig(vocab_size=151936, hidden_size=4096, intermediate_size=12288,
                             num_hidden_layers=36, num_attention_heads=32, num_key_value_heads=8,
                             attn_head_dim=128, rms_norm_eps=1e-6, rope_theta=1000000.0, qk_norm=True),
     "llama3.2-1b": ModelConfig(vocab_size=128256, hidden_size=2048, intermediate_size=8192,
@@ -215,6 +221,8 @@ class Config:
             errors.append("attention_impl must be 'reference' or 'cudnn'.")
         if t.attention_impl == "cudnn" and p.cp > 1:
             errors.append("attention_impl='cudnn' does not support context parallelism; use 'reference'.")
+        if t.attention_impl == "cudnn" and t.dtype == "float32":
+            errors.append("attention_impl='cudnn' requires bfloat16 compute (use --dtype bfloat16 or auto).")
         if t.dtype not in ("auto", "bfloat16", "float32"):
             errors.append("dtype must be auto, bfloat16 or float32.")
         if t.remat not in ("full", "dots", "none"):

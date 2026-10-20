@@ -7,8 +7,8 @@ inference), and automatically falls back to full-sequence forward when --pp > 1,
 --cp > 1, or --no_kv_cache is passed.
 
 jaxotron-generate --checkpoint_dir checkpoints/run --prompt "Once upon a time"
-jaxotron-generate --checkpoint_dir checkpoints/run --prompt "5 8 11"            # synthetic data: token ids
-jaxotron-generate --hf HuggingFaceTB/SmolLM2-135M --prompt "Gravity is"        # pretrained weights
+jaxotron-generate --checkpoint_dir checkpoints/run --prompt "5 8 11"             # synthetic data: token ids
+jaxotron-generate --hf HuggingFaceTB/SmolLM2-135M --prompt "Gravity is"         # pretrained weights
 jaxotron-generate --hf Qwen/Qwen3-0.6B --cpu_devices 4 --tp 4 --prompt "JAX is" # Qwen3 + TP inference
 """
 from __future__ import annotations
@@ -45,6 +45,10 @@ def parse_args(argv=None):
     args = ap.parse_args(argv)
     if args.max_new_tokens < 1:
         ap.error("--max_new_tokens must be >= 1")
+    if args.top_k < 0:
+        ap.error("--top_k must be >= 0")
+    if not 0.0 < args.top_p <= 1.0:
+        ap.error("--top_p must be in (0, 1]")
     return args
 
 
@@ -62,7 +66,8 @@ def _sample_from_logits(logits, valid_vocab: int, temperature: float, top_k: int
     if top_p < 1.0:
         sorted_logits = jnp.sort(logits)[::-1]
         cumulative = jnp.cumsum(jax.nn.softmax(sorted_logits))
-        cutoff = sorted_logits[jnp.argmax(cumulative >= top_p)]
+        mask = (cumulative >= top_p).at[-1].set(True)  # guard against float32 sum slightly < 1.0
+        cutoff = sorted_logits[jnp.argmax(mask)]
         logits = jnp.where(logits < cutoff, -jnp.inf, logits)
     return jax.random.categorical(key, logits)
 
@@ -160,12 +165,15 @@ def main(argv=None):
     def emit(pos: int) -> bool:
         """Stream the newly generated token at `pos`. Returns True if it is EOS."""
         nonlocal printed
+        is_eos = eos is not None and tokens[0, pos] == eos
         text = render(tokens[0, :pos + 1].tolist())
+        if text.endswith("\ufffd") and not is_eos:  # wait for remaining bytes of a multi-byte UTF-8 character
+            return False
         if text.startswith(printed):  # stream only the new characters
             sys.stdout.write(text[len(printed):] if tokenizer else " " + str(tokens[0, pos]))
             sys.stdout.flush()
             printed = text
-        return eos is not None and tokens[0, pos] == eos
+        return is_eos
 
     key = jax.random.PRNGKey(args.seed)
     pos = first

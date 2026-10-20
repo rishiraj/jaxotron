@@ -202,6 +202,11 @@ def train(cfg: Config) -> dict:
         print0(f"Resumed from step {start_step} ({cfg.checkpoint_dir})")
     if jax.process_index() == 0:
         cfg.save_json(f"{cfg.checkpoint_dir.rstrip('/')}/config.json")
+    if start_step >= total_steps and not cfg.dry_run and not cfg.show_collectives:
+        print0(f"Checkpoint is already at step {start_step} >= total_steps ({total_steps}); "
+               "increase --steps or pass a new --checkpoint_dir.")
+        ckpt.close()
+        return {}
 
     # ---- data ---------------------------------------------------------------
     data_sharding = batch_sharding(mesh)
@@ -240,7 +245,8 @@ def train(cfg: Config) -> dict:
     logger = MetricLogger(cfg.wandb_project, cfg.run_name, cfg.to_dict())
     tokens_per_step = t.global_batch_size * t.sequence_length
     flops_per_step = flops_per_token(cfg.model, t.sequence_length) * tokens_per_step
-    peak = cfg.peak_tflops * 1e12 if cfg.peak_tflops else (peak_flops_per_device() if ctx.dtype == jnp.bfloat16 else None)
+    is_bf16 = ctx.dtype == jnp.bfloat16
+    peak = cfg.peak_tflops * 1e12 if cfg.peak_tflops else (peak_flops_per_device() if is_bf16 else None)
 
     print0("Starting training...")
     last, done, last_saved, profiling = {}, start_step, start_step, False
@@ -301,8 +307,12 @@ def train(cfg: Config) -> dict:
                 timer += time.perf_counter() - eval_tic  # exclude eval time without losing step timing
 
             if done % t.save_every == 0 or done == total_steps:
+                save_tic = time.perf_counter()
                 ckpt.save(done, params, opt_state)
+                if done < total_steps and jax.default_backend() == "cpu":
+                    ckpt.wait()  # CPU arrays share host RAM; finish writing before next step donates buffers
                 last_saved = done
+                timer += time.perf_counter() - save_tic
     except KeyboardInterrupt:
         if jax.process_count() > 1:
             raise

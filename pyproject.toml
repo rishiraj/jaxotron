@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-authors = [{ name = "Jaxotron contributors" }]
+authors = [{ name = "Rishiraj Acharya" }]
 keywords = [
   "jax", "llm", "distributed-training", "4d-parallelism", "tensor-parallelism",
   "sequence-parallelism", "pipeline-parallelism", "context-parallelism", "fsdp",

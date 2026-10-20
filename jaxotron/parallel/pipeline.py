@@ -65,7 +65,7 @@ def pipeline_apply(stage_fn: Callable, stage_params, x: jax.Array, ctx: Parallel
     num_stages, num_micro = ctx.pp, ctx.pp_microbatches
 
     inputs = ctx.shard(split_microbatches(x, num_micro), None, "batch", "res_seq", "act_embed")
-    outputs = jnp.zeros_like(inputs)
+    outputs = ctx.shard(jnp.zeros_like(inputs), None, "batch", "res_seq", "act_embed")
     state = jnp.zeros((num_stages,) + inputs.shape[1:], inputs.dtype)
     state = ctx.shard(state, "stage", "batch", "res_seq", "act_embed")
 
@@ -88,10 +88,11 @@ def pipeline_apply(stage_fn: Callable, stage_params, x: jax.Array, ctx: Parallel
         previous = jax.lax.dynamic_index_in_dim(outputs, safe_idx, keepdims=False)
         finished = jnp.where(out_idx >= 0, state[num_stages - 1], previous)
         outputs = jax.lax.dynamic_update_index_in_dim(outputs, finished, safe_idx, axis=0)
+        outputs = ctx.shard(outputs, None, "batch", "res_seq", "act_embed")
 
         # 4. Send activations to the next stage (lowered to a collective-permute).
         state = ctx.shard(jnp.roll(state, shift=1, axis=0), "stage", "batch", "res_seq", "act_embed")
         return (state, outputs), None
 
     (_, outputs), _ = jax.lax.scan(iteration, (state, outputs), jnp.arange(num_micro + num_stages - 1))
-    return merge_microbatches(outputs)
+    return ctx.shard(merge_microbatches(outputs), "batch", "res_seq", "act_embed")

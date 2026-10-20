@@ -35,6 +35,7 @@ class Checkpointer:
 
     def save(self, step: int, params, opt_state) -> bool:
         """Start an async save. Returns False if this step is already saved."""
+        self.manager.wait_until_finished()  # ensure any previous async save is complete before checking steps
         if step in self.manager.all_steps():
             return False
         return self.manager.save(step, args=ocp.args.Composite(

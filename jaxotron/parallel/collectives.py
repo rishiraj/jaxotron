@@ -4,10 +4,10 @@
 
 prints something like
 
-    collective           mesh axes      ops   bytes (static)
-    all-reduce           tp              17      1.31 MiB
-    all-reduce           dp              12    330.00 KiB
-    collective-permute   pp               2    256.00 KiB
+    collective            mesh axes       ops   bytes (static)
+    all-reduce            tp               17      1.31 MiB
+    all-reduce            dp               12    330.00 KiB
+    collective-permute    pp                2    256.00 KiB
 
 Each collective's replica groups (or source/target pairs) are mapped back to
 mesh coordinates; the "mesh axes" column lists the axes along which members of
@@ -31,7 +31,7 @@ _OP_RE = re.compile(r"\b(" + "|".join(COLLECTIVES) + r")(-start)?\(")
 _GROUPS_LIST_RE = re.compile(r"replica_groups=\{((?:\{[\d,\s]*\},?\s*)*)\}")
 _GROUPS_MESH_RE = re.compile(r"replica_groups=mesh\[([^\]]*)\]\s*\{([^}]*)\}")
 _GROUPS_IOTA_RE = re.compile(r"replica_groups=\[([\d,]+)\]<=\[([\d,]+)\](?:T\(([\d,]+)\))?")
-_PAIRS_RE = re.compile(r"source_target_pairs=\{((?:\{\d+,\d+\},?)*)\}")
+_PAIRS_RE = re.compile(r"source_target_pairs=\{((?:\{\s*\d+\s*,\s*\d+\s*\},?\s*)*)\}")
 _TYPE_RE = re.compile(r"\b(pred|s8|u8|s16|u16|s32|u32|s64|u64|bf16|f16|f32|f64)\[([\d,]*)\]")
 _BYTES = {"pred": 1, "s8": 1, "u8": 1, "s16": 2, "u16": 2, "bf16": 2, "f16": 2,
           "s32": 4, "u32": 4, "f32": 4, "s64": 8, "u64": 8, "f64": 8}
@@ -63,7 +63,7 @@ def _parse_groups(line: str, num_devices: Optional[int] = None) -> list[list[int
         return groups
     m = _PAIRS_RE.search(line)
     if m:
-        return [[int(a), int(b)] for a, b in re.findall(r"\{(\d+),(\d+)\}", m.group(1))]
+        return [[int(a), int(b)] for a, b in re.findall(r"\{\s*(\d+)\s*,\s*(\d+)\s*\}", m.group(1))]
     return []
 
 
@@ -82,9 +82,15 @@ def _axes_for_groups(groups: Iterable[list[int]], mesh: Mesh) -> tuple[str, ...]
 
 def _result_bytes(line: str) -> int:
     lhs = line.split("=", 1)[1] if "=" in line else line
-    head = lhs.split("(", 1)[0] if not lhs.strip().startswith("(") else lhs.split(")", 1)[0]
+    m = _OP_RE.search(lhs)
+    head = lhs[:m.start()] if m else lhs.split("(", 1)[0]
+    shapes = _TYPE_RE.findall(head)
+    # Async `all-gather-start`, `reduce-scatter-start`, and `collective-permute-start` return
+    # `(operand_type, result_type, ...)` in HLO; count only the result half rather than operand + result.
+    if m and m.group(2) == "-start" and m.group(1) != "all-reduce" and len(shapes) >= 2 and len(shapes) % 2 == 0:
+        shapes = shapes[len(shapes) // 2:]
     total = 0
-    for dtype, dims in _TYPE_RE.findall(head):
+    for dtype, dims in shapes:
         n = int(np.prod([int(d) for d in dims.split(",") if d])) if dims else 1
         total += n * _BYTES[dtype]
     return total

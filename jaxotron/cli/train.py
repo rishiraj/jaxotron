@@ -18,6 +18,7 @@ jaxotron-train --config checkpoints/run/config.json --steps 600 --set train.lear
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 
 # CLI flag -> Config field. With --config, only the flags typed on the command line override the file.
@@ -113,7 +114,11 @@ def explicit_flags(argv=None) -> set[str]:
 def _set_field(cfg, path: str, value) -> None:
     section, _, name = path.partition(".")
     if name:
-        setattr(getattr(cfg, section), name, value)
+        obj = getattr(cfg, section)
+        if dataclasses.is_dataclass(obj) and obj.__dataclass_params__.frozen:
+            setattr(cfg, section, dataclasses.replace(obj, **{name: value}))
+        else:
+            setattr(obj, name, value)
     else:
         setattr(cfg, section, value)
 
@@ -126,11 +131,16 @@ def setup_cpu_devices(n: int) -> None:
         os.environ["XLA_FLAGS"] = " ".join(flags + [f"--xla_force_host_platform_device_count={n}"])
 
 
+def _ensure_synthetic_data(data_path: str) -> None:
+    if not os.path.exists(data_path) and os.path.normpath(data_path) == os.path.normpath("data/synthetic/train.bin"):
+        from jaxotron.data.synthetic import write_synthetic_dataset
+        print("Generating synthetic dataset in data/synthetic ...")
+        write_synthetic_dataset("data/synthetic")
+
+
 def main(argv=None):
     args = parse_args(argv)
     setup_cpu_devices(args.cpu_devices)
-
-    import dataclasses
 
     from jaxotron.config import MODEL_PRESETS, Config, ParallelConfig, TrainConfig, apply_override
     from jaxotron.data.loader import read_meta
@@ -158,12 +168,7 @@ def main(argv=None):
         if args.preset not in MODEL_PRESETS:
             raise SystemExit(f"Unknown preset {args.preset!r}. Choose from {sorted(MODEL_PRESETS)}")
 
-        # Zero-setup demo data.
-        if not os.path.exists(args.data) and os.path.normpath(args.data) == os.path.normpath("data/synthetic/train.bin"):
-            from jaxotron.data.synthetic import write_synthetic_dataset
-            print("Generating synthetic dataset in data/synthetic ...")
-            write_synthetic_dataset("data/synthetic")
-
+        _ensure_synthetic_data(args.data)
         meta_vocab = read_meta(args.data).get("vocab_size")
         if args.init_from_hf:
             from jaxotron.hf import hf_model_config, resolve_hf_path
@@ -179,11 +184,6 @@ def main(argv=None):
                     print(f"vocab_size inferred from dataset: {meta_vocab} -> {padded} (padded)")
                 model = dataclasses.replace(model, vocab_size=padded)
 
-        val_path = args.val_data
-        if val_path is None:
-            candidate = os.path.join(os.path.dirname(args.data), "val.bin")
-            val_path = candidate if os.path.exists(candidate) else None
-
         cfg = Config(
             parallel=ParallelConfig(dp=args.dp, fsdp=args.fsdp, pp=args.pp, cp=args.cp, tp=args.tp,
                                     sp=args.sp, pp_microbatches=args.pp_microbatches),
@@ -193,7 +193,7 @@ def main(argv=None):
                               learning_rate=args.lr, warmup_steps=args.warmup, dtype=args.dtype, remat=args.remat,
                               attention_impl=args.attention, log_every=args.log_every,
                               eval_every=args.eval_every, save_every=args.save_every, seed=args.seed),
-            data_path=args.data, val_path=val_path, checkpoint_dir=args.checkpoint_dir,
+            data_path=args.data, val_path=args.val_data, checkpoint_dir=args.checkpoint_dir,
             init_from_hf=args.init_from_hf, run_name=args.run_name, wandb_project=args.wandb_project,
             distributed=args.distributed, profile_dir=args.profile_dir, dry_run=args.dry_run,
             show_sharding=args.show_sharding, show_mesh=args.show_mesh, show_collectives=args.show_collectives,
@@ -203,6 +203,11 @@ def main(argv=None):
     for item in args.set:
         key, _, value = item.partition("=")
         apply_override(cfg, key.strip(), value.strip())
+
+    _ensure_synthetic_data(cfg.data_path)
+    if cfg.val_path is None:
+        candidate = os.path.join(os.path.dirname(cfg.data_path), "val.bin")
+        cfg.val_path = candidate if os.path.exists(candidate) else None
 
     from jaxotron.utils import enable_compilation_cache
     enable_compilation_cache(args.compile_cache)

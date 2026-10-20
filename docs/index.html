@@ -1,0 +1,1159 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jaxotron 4D Studio — Interactive GSPMD &amp; 5D Parallelism Explorer</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: #0b0f19;
+      color: #e2e8f0;
+    }
+    code, pre, .mono {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .glass-card {
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(51, 65, 85, 0.7);
+      backdrop-filter: blur(8px);
+    }
+    .stage-cell {
+      transition: all 0.2s ease;
+    }
+    .stage-cell:hover {
+      transform: translateY(-2px);
+    }
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body class="min-h-screen antialiased selection:bg-indigo-500 selection:text-white">
+  <!-- Top Header -->
+  <header class="border-b border-slate-800 bg-slate-950/90 sticky top-0 z-30 backdrop-blur">
+    <div class="max-w-7xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-indigo-500 via-purple-500 to-amber-500 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
+          JX
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="font-bold text-base sm:text-lg text-white tracking-tight">Jaxotron 4D Studio</h1>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 mono">v0.4.0 · GSPMD</span>
+          </div>
+          <p class="text-xs text-slate-400">Interactive 5D Mesh, Logical Sharding Rules &amp; XLA Collective Explorer · Created by Rishiraj Acharya</p>
+        </div>
+      </div>
+
+      <!-- 7-Act DevFest Stage Switcher -->
+      <div class="flex items-center gap-1.5 flex-wrap">
+        <span class="text-xs font-medium text-slate-400 mr-1 hidden sm:inline">DevFest Live Acts:</span>
+        <button type="button" data-act="act1" class="act-btn text-xs px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">Act 1: 1-Dev</button>
+        <button type="button" data-act="act2" class="act-btn text-xs px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">Act 2: FSDP×8</button>
+        <button type="button" data-act="act3a" class="act-btn text-xs px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">Act 3a: TP=4</button>
+        <button type="button" data-act="act3b" class="act-btn text-xs px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">Act 3b: TP=4+SP</button>
+        <button type="button" data-act="act4" class="act-btn text-xs px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">Act 4: TP×CP</button>
+        <button type="button" data-act="act5" class="act-btn text-xs px-2.5 py-1.5 rounded-md bg-indigo-600 text-white border border-indigo-500 transition">Act 5: Full 4D (16x)</button>
+        <button type="button" data-act="act7" class="act-btn text-xs px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">Act 7: Qwen3-0.6B TP=4</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Act Banner Narrative -->
+  <div class="bg-gradient-to-r from-indigo-950/70 via-slate-900 to-purple-950/70 border-b border-slate-800/80">
+    <div class="max-w-7xl mx-auto px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+      <div class="flex items-center gap-2 text-xs sm:text-sm">
+        <span id="actBadge" class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold mono">ACT 5</span>
+        <span id="actDescription" class="text-slate-200 font-medium">Full 4D Parallelism (DP=2 × PP=2 × CP=2 × TP=2) on 16 simulated devices: weights, pipeline stages, sequence, and batch all partitioned simultaneously.</span>
+      </div>
+      <div id="validationBanner" class="text-xs px-2.5 py-1 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 mono">
+        ✓ Valid Mesh &amp; Model Shapes
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Content Grid -->
+  <main class="max-w-7xl mx-auto px-4 py-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
+    <!-- Left Sidebar: Controls (4 cols on lg) -->
+    <aside class="lg:col-span-4 space-y-4">
+      <!-- Model Preset & Hyperparams -->
+      <div class="glass-card rounded-xl p-4 space-y-3.5">
+        <div class="flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-white uppercase tracking-wider">1. Model &amp; Batch Config</h2>
+          <span id="paramCountBadge" class="text-xs mono text-indigo-300 bg-indigo-950/80 px-2 py-0.5 rounded border border-indigo-800/60">1.64M params</span>
+        </div>
+
+        <div>
+          <label for="presetSelect" class="block text-xs text-slate-400 mb-1">Architecture Preset (`MODEL_PRESETS`)</label>
+          <select id="presetSelect" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs sm:text-sm text-white focus:outline-none focus:border-indigo-500 mono">
+            <option value="tiny">tiny (4L, 256d, 8/4H, V=1024)</option>
+            <option value="125m">125m (12L, 768d, 12/4H, V=49152)</option>
+            <option value="smollm2-135m">smollm2-135m (30L, 576d, 9/3H)</option>
+            <option value="smollm2-360m">smollm2-360m (32L, 960d, 15/5H)</option>
+            <option value="smollm2-1.7b">smollm2-1.7b (24L, 2048d, 32/32H)</option>
+            <option value="qwen2.5-0.5b">qwen2.5-0.5b (24L, 896d, 14/2H, qkv_bias)</option>
+            <option value="qwen2.5-1.5b">qwen2.5-1.5b (28L, 1536d, 12/2H, qkv_bias)</option>
+            <option value="qwen3-0.6b">qwen3-0.6b (28L, 1024d, 16/8H, hd=128, qk_norm)</option>
+            <option value="qwen3-1.7b">qwen3-1.7b (28L, 2048d, 16/8H, hd=128, qk_norm)</option>
+            <option value="qwen3-4b">qwen3-4b (36L, 2560d, 32/8H, hd=128, qk_norm)</option>
+            <option value="qwen3-8b">qwen3-8b (36L, 4096d, 32/8H, hd=128, qk_norm)</option>
+            <option value="llama3.2-1b">llama3.2-1b (16L, 2048d, 32/8H, RoPE-3.1)</option>
+            <option value="llama3.2-3b">llama3.2-3b (28L, 3072d, 24/8H, RoPE-3.1)</option>
+            <option value="llama3.1-8b">llama3.1-8b (32L, 4096d, 32/8H, RoPE-3.1)</option>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-3 gap-2 text-xs">
+          <div>
+            <label for="seqLenSelect" class="block text-slate-400 mb-1">Seq Length</label>
+            <select id="seqLenSelect" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-white mono">
+              <option value="128" selected>128</option>
+              <option value="256">256</option>
+              <option value="512">512</option>
+              <option value="1024">1024</option>
+              <option value="2048">2048</option>
+            </select>
+          </div>
+          <div>
+            <label for="gbsSelect" class="block text-slate-400 mb-1">Global Batch</label>
+            <select id="gbsSelect" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-white mono">
+              <option value="8">8</option>
+              <option value="16" selected>16</option>
+              <option value="32">32</option>
+              <option value="64">64</option>
+            </select>
+          </div>
+          <div>
+            <label for="mbsSelect" class="block text-slate-400 mb-1">Micro Batch</label>
+            <select id="mbsSelect" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-white mono">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="4" selected>4</option>
+              <option value="8">8</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <!-- 5D Mesh Controls -->
+      <div class="glass-card rounded-xl p-4 space-y-3.5">
+        <div class="flex items-center justify-between">
+          <h2 class="text-sm font-semibold text-white uppercase tracking-wider">2. 5D Device Mesh Axes</h2>
+          <span id="worldSizeBadge" class="text-xs mono text-amber-300 bg-amber-950/60 px-2 py-0.5 rounded border border-amber-700/50">16 devices</span>
+        </div>
+        <p class="text-xs text-slate-400 leading-relaxed">
+          Axis order: <code class="text-indigo-300">("dp", "pp", "fsdp", "cp", "tp")</code>. Innermost <code class="text-indigo-300">tp</code> sits on fastest ICI/NVLink; outermost <code class="text-indigo-300">dp</code> spans hosts.
+        </p>
+
+        <!-- Axis Sliders -->
+        <div class="space-y-2.5 text-xs">
+          <div>
+            <div class="flex justify-between mb-1">
+              <span class="font-medium text-sky-300">DP (Data Parallel — replicated weights)</span>
+              <span id="dpVal" class="mono font-semibold text-white">2</span>
+            </div>
+            <input id="dpRange" type="range" min="1" max="8" step="1" value="2" class="w-full accent-sky-400 cursor-pointer" />
+          </div>
+
+          <div>
+            <div class="flex justify-between mb-1">
+              <span class="font-medium text-emerald-300">FSDP (ZeRO-3 — sharded weights &amp; AdamW)</span>
+              <span id="fsdpVal" class="mono font-semibold text-white">1</span>
+            </div>
+            <input id="fsdpRange" type="range" min="1" max="8" step="1" value="1" class="w-full accent-emerald-400 cursor-pointer" />
+          </div>
+
+          <div>
+            <div class="flex justify-between mb-1">
+              <span class="font-medium text-amber-300">PP (Pipeline Parallel — layer stages)</span>
+              <span id="ppVal" class="mono font-semibold text-white">2</span>
+            </div>
+            <input id="ppRange" type="range" min="1" max="8" step="1" value="2" class="w-full accent-amber-400 cursor-pointer" />
+          </div>
+
+          <div>
+            <div class="flex justify-between mb-1">
+              <span class="font-medium text-pink-300">CP (Context Parallel — sequence split)</span>
+              <span id="cpVal" class="mono font-semibold text-white">2</span>
+            </div>
+            <input id="cpRange" type="range" min="1" max="8" step="1" value="2" class="w-full accent-pink-400 cursor-pointer" />
+          </div>
+
+          <div>
+            <div class="flex justify-between mb-1">
+              <span class="font-medium text-purple-300">TP (Tensor Parallel — heads/MLP/vocab)</span>
+              <span id="tpVal" class="mono font-semibold text-white">2</span>
+            </div>
+            <input id="tpRange" type="range" min="1" max="8" step="1" value="2" class="w-full accent-purple-400 cursor-pointer" />
+          </div>
+        </div>
+
+        <!-- Sequence Parallelism Toggle -->
+        <div class="pt-2 border-t border-slate-800 flex items-center justify-between">
+          <div>
+            <div class="text-xs font-semibold text-white">Sequence Parallelism (<code class="text-purple-300">--sp</code>)</div>
+            <div class="text-[11px] text-slate-400">Shards residual &amp; RMSNorm over <code class="text-purple-300">("cp", "tp")</code></div>
+          </div>
+          <label class="relative inline-flex items-center cursor-pointer">
+            <input type="checkbox" id="spToggle" class="sr-only peer" />
+            <div class="w-10 h-5 bg-slate-700 rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-purple-600"></div>
+          </label>
+        </div>
+      </div>
+
+      <!-- Live CLI Command Box -->
+      <div class="glass-card rounded-xl p-4 space-y-2.5">
+        <div class="flex items-center justify-between">
+          <h2 class="text-xs font-semibold text-slate-300 uppercase tracking-wider">Generated CLI Command</h2>
+          <button type="button" id="copyCliBtn" class="text-xs px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition">
+            Copy Command
+          </button>
+        </div>
+        <pre id="cliOutput" class="bg-slate-950 border border-slate-800 rounded-lg p-3 text-xs text-emerald-300 overflow-x-auto whitespace-pre-wrap leading-relaxed"></pre>
+      </div>
+    </aside>
+
+    <!-- Right Main Area: Interactive Visualizations (8 cols on lg) -->
+    <section class="lg:col-span-8 space-y-4">
+      <!-- Top KPI Summary Cards -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="glass-card rounded-xl p-3.5">
+          <div class="text-[11px] text-slate-400 uppercase">Params / Device</div>
+          <div id="kpiParamMem" class="text-lg sm:text-xl font-bold text-white mono mt-0.5">0.44 MiB</div>
+          <div id="kpiOptMem" class="text-[11px] text-slate-400 mt-0.5">+ AdamW: 1.31 MiB</div>
+        </div>
+        <div class="glass-card rounded-xl p-3.5">
+          <div class="text-[11px] text-slate-400 uppercase">Tokens / Step</div>
+          <div id="kpiTokensStep" class="text-lg sm:text-xl font-bold text-sky-300 mono mt-0.5">2.05K</div>
+          <div id="kpiGradAccum" class="text-[11px] text-slate-400 mt-0.5">Grad accum: 2x</div>
+        </div>
+        <div class="glass-card rounded-xl p-3.5">
+          <div class="text-[11px] text-slate-400 uppercase">Pipeline Bubble</div>
+          <div id="kpiBubble" class="text-lg sm:text-xl font-bold text-amber-300 mono mt-0.5">20.0%</div>
+          <div id="kpiMicrobatches" class="text-[11px] text-slate-400 mt-0.5">PP stages: 2 | M: 4</div>
+        </div>
+        <div class="glass-card rounded-xl p-3.5">
+          <div class="text-[11px] text-slate-400 uppercase">XLA Collectives</div>
+          <div id="kpiCollectives" class="text-lg sm:text-xl font-bold text-purple-300 mono mt-0.5">30 ops</div>
+          <div id="kpiActiveAxes" class="text-[11px] text-slate-400 mt-0.5">Axes: dp, pp, cp, tp</div>
+        </div>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <div class="flex flex-wrap gap-1.5 border-b border-slate-800 pb-2">
+        <button type="button" data-tab="tab-mesh" class="tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium bg-indigo-600 text-white transition">
+          1. 5D Mesh &amp; Sharding (`--show_sharding`)
+        </button>
+        <button type="button" data-tab="tab-collectives" class="tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium bg-slate-800/80 text-slate-300 hover:bg-slate-800 transition">
+          2. Logical Rules &amp; XLA Collectives (`rules.py`)
+        </button>
+        <button type="button" data-tab="tab-pipeline" class="tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium bg-slate-800/80 text-slate-300 hover:bg-slate-800 transition">
+          3. GPipe Pipeline Animator (`pipeline.py`)
+        </button>
+        <button type="button" data-tab="tab-scorecard" class="tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium bg-slate-800/80 text-slate-300 hover:bg-slate-800 transition">
+          4. 8-Layout Scorecard (`jaxotron-compare`)
+        </button>
+      </div>
+
+      <!-- TAB 1: 5D MESH & SHARDING TABLE -->
+      <div id="tab-mesh" class="tab-panel space-y-4">
+        <div class="glass-card rounded-xl p-4 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 class="text-sm font-semibold text-white">Interactive Device Topology (`--show_mesh`)</h3>
+              <p class="text-xs text-slate-400">Click any accelerator below to inspect the exact layers, attention heads, sequence slice, and batch shard it owns.</p>
+            </div>
+            <span id="meshDescribe" class="text-xs mono px-2.5 py-1 rounded bg-slate-900 border border-slate-700 text-indigo-300">DP=2 x PP=2 x CP=2 x TP=2</span>
+          </div>
+
+          <!-- Selected Device Inspector -->
+          <div id="deviceInspector" class="bg-slate-950/90 border border-indigo-500/40 rounded-lg p-3 grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs"></div>
+
+          <!-- Device Grid -->
+          <div id="deviceGrid" class="grid grid-cols-2 sm:grid-cols-4 gap-2.5 max-h-72 overflow-y-auto p-1"></div>
+        </div>
+
+        <!-- Parameter Sharding Table -->
+        <div class="glass-card rounded-xl p-4 space-y-3">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-sm font-semibold text-white">Parameter Sharding Table (`--show_sharding`)</h3>
+              <p class="text-xs text-slate-400">Every weight and AdamW moment is allocated directly in its sharded layout via <code class="text-indigo-300">jax.jit(init, out_shardings=...)</code>.</p>
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs mono">
+              <thead>
+                <tr class="border-b border-slate-700 text-slate-400">
+                  <th class="py-2 px-2.5">Parameter</th>
+                  <th class="py-2 px-2.5">Logical Axes</th>
+                  <th class="py-2 px-2.5">Global Shape</th>
+                  <th class="py-2 px-2.5">PartitionSpec</th>
+                  <th class="py-2 px-2.5 text-right">Shard Shape</th>
+                  <th class="py-2 px-2.5 text-right">MB / Device</th>
+                </tr>
+              </thead>
+              <tbody id="shardingTableBody" class="divide-y divide-slate-800/70"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 2: LOGICAL RULES & XLA COLLECTIVES -->
+      <div id="tab-collectives" class="tab-panel hidden space-y-4">
+        <div class="glass-card rounded-xl p-4 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 class="text-sm font-semibold text-white">Live <code class="text-indigo-300">jaxotron/parallel/rules.py</code> Editor</h3>
+              <p class="text-xs text-slate-400">Toggle logical-to-mesh mappings below (just like live on stage!) and watch XLA's GSPMD compiler change the communication schedule.</p>
+            </div>
+            <button type="button" id="resetRulesBtn" class="text-xs px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700">
+              Reset Default Rules
+            </button>
+          </div>
+
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+            <div class="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2">
+              <div class="font-semibold text-amber-300 mono mb-1">WEIGHT_RULES</div>
+              <div class="flex items-center justify-between">
+                <span class="mono text-slate-300">"layers":</span>
+                <span class="mono text-amber-300">"pp" (stage owns L/pp layers)</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="mono text-slate-300">"embed":</span>
+                <select id="ruleEmbedSelect" class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-emerald-300 mono">
+                  <option value="fsdp" selected>"fsdp" (ZeRO-3 sharded)</option>
+                  <option value="None">None (Replicated hidden)</option>
+                </select>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="mono text-slate-300">"heads" / "kv_heads" / "mlp":</span>
+                <select id="ruleTpSelect" class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-purple-300 mono">
+                  <option value="tp" selected>"tp" (Tensor Parallel)</option>
+                  <option value="None">None (Replicated cols)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2">
+              <div class="font-semibold text-sky-300 mono mb-1">ACTIVATION_RULES</div>
+              <div class="flex items-center justify-between">
+                <span class="mono text-slate-300">"batch":</span>
+                <span class="mono text-sky-300">("dp", "fsdp")</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="mono text-slate-300">"res_seq" (--sp):</span>
+                <span id="ruleResSeqLabel" class="mono text-purple-300">"cp"</span>
+              </div>
+              <div class="flex items-center justify-between">
+                <span class="mono text-slate-300">"kv_seq" (Attention K/V):</span>
+                <select id="ruleKvSeqSelect" class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-pink-300 mono">
+                  <option value="None" selected>None (All-Gather K/V over cp)</option>
+                  <option value="cp">"cp" (Local K/V only)</option>
+                </select>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Collectives Table -->
+        <div class="glass-card rounded-xl p-4 space-y-3">
+          <h3 class="text-sm font-semibold text-white">XLA GSPMD Collectives Inserted (<code class="text-indigo-300">--show_collectives</code>)</h3>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs mono">
+              <thead>
+                <tr class="border-b border-slate-700 text-slate-400">
+                  <th class="py-2 px-3">Collective Op</th>
+                  <th class="py-2 px-3">Mesh Axis</th>
+                  <th class="py-2 px-3 text-right">Static Ops</th>
+                  <th class="py-2 px-3 text-right">Static Volume</th>
+                  <th class="py-2 px-3">Why XLA Inserted It</th>
+                </tr>
+              </thead>
+              <tbody id="collectivesTableBody" class="divide-y divide-slate-800/70"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB 3: GPIPE PIPELINE SCHEDULE ANIMATOR -->
+      <div id="tab-pipeline" class="tab-panel hidden space-y-4">
+        <div class="glass-card rounded-xl p-4 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 class="text-sm font-semibold text-white">GPipe Pipeline Schedule &amp; <code class="text-amber-300">collective-permute</code> Animator</h3>
+              <p class="text-xs text-slate-400">In <code class="text-indigo-300">parallel/pipeline.py</code> (~40 lines), <code class="text-indigo-300">jax.vmap(stage_fn, spmd_axis_name="pp")</code> runs all stages in parallel and <code class="text-indigo-300">jnp.roll</code> shifts activations between stages.</p>
+            </div>
+            <div class="flex items-center gap-2">
+              <label for="ppMicroSelect" class="text-xs text-slate-400">Microbatches (M):</label>
+              <select id="ppMicroSelect" class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white mono">
+                <option value="2">2</option>
+                <option value="4" selected>4</option>
+                <option value="8">8</option>
+              </select>
+              <button type="button" id="playPipeBtn" class="text-xs px-3 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white font-medium transition">
+                ▶ Animate Clock
+              </button>
+              <button type="button" id="resetPipeBtn" class="text-xs px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700">
+                Reset
+              </button>
+            </div>
+          </div>
+
+          <div id="pipelineInfoBar" class="text-xs bg-slate-950 border border-slate-800 rounded-lg p-2.5 flex flex-wrap items-center justify-between gap-2 mono"></div>
+
+          <!-- Timeline Grid -->
+          <div id="pipelineTimeline" class="overflow-x-auto pb-2"></div>
+        </div>
+      </div>
+
+      <!-- TAB 4: 8-LAYOUT SCORECARD -->
+      <div id="tab-scorecard" class="tab-panel hidden space-y-4">
+        <div class="glass-card rounded-xl p-4 space-y-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 class="text-sm font-semibold text-white">8-Layout Parity &amp; Collective Scorecard (<code class="text-indigo-300">jaxotron-compare</code>)</h3>
+              <p class="text-xs text-slate-400">Click any row below to load that strategy into the studio. Every parallel layout produces the exact same loss and gradients (<code class="text-emerald-300">&lt; 1e-5</code>) as 1 device.</p>
+            </div>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-left border-collapse text-xs mono">
+              <thead>
+                <tr class="border-b border-slate-700 text-slate-400">
+                  <th class="py-2 px-2.5">Strategy</th>
+                  <th class="py-2 px-2.5 text-right">Devices</th>
+                  <th class="py-2 px-2.5 text-right">Params / Dev</th>
+                  <th class="py-2 px-2.5 text-right">Loss</th>
+                  <th class="py-2 px-2.5 text-right">max |Δgrad|</th>
+                  <th class="py-2 px-2.5">XLA Collectives (Mesh Axis)</th>
+                </tr>
+              </thead>
+              <tbody id="scorecardTableBody" class="divide-y divide-slate-800/70"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Toast Notification -->
+  <div id="toast" class="fixed bottom-4 right-4 bg-emerald-600 text-white text-xs font-medium px-4 py-2.5 rounded-lg shadow-xl opacity-0 pointer-events-none transition-opacity duration-200 z-50 mono">
+    Copied CLI command to clipboard!
+  </div>
+
+  <script>
+    const MODEL_PRESETS = {
+      "tiny":         { vocab: 1024,   d: 256,  f: 768,   l: 4,  h: 8,  kv: 4,  hd: 32,  qk_norm: false, qkv_bias: false },
+      "125m":         { vocab: 49152,  d: 768,  f: 2048,  l: 12, h: 12, kv: 4,  hd: 64,  qk_norm: false, qkv_bias: false },
+      "smollm2-135m": { vocab: 49152,  d: 576,  f: 1536,  l: 30, h: 9,  kv: 3,  hd: 64,  qk_norm: false, qkv_bias: false },
+      "smollm2-360m": { vocab: 49152,  d: 960,  f: 2560,  l: 32, h: 15, kv: 5,  hd: 64,  qk_norm: false, qkv_bias: false },
+      "smollm2-1.7b": { vocab: 49152,  d: 2048, f: 8192,  l: 24, h: 32, kv: 32, hd: 64,  qk_norm: false, qkv_bias: false },
+      "qwen2.5-0.5b": { vocab: 151936, d: 896,  f: 4864,  l: 24, h: 14, kv: 2,  hd: 64,  qk_norm: false, qkv_bias: true  },
+      "qwen2.5-1.5b": { vocab: 151936, d: 1536, f: 8960,  l: 28, h: 12, kv: 2,  hd: 128, qk_norm: false, qkv_bias: true  },
+      "qwen3-0.6b":   { vocab: 151936, d: 1024, f: 3072,  l: 28, h: 16, kv: 8,  hd: 128, qk_norm: true,  qkv_bias: false },
+      "qwen3-1.7b":   { vocab: 151936, d: 2048, f: 6144,  l: 28, h: 16, kv: 8,  hd: 128, qk_norm: true,  qkv_bias: false },
+      "qwen3-4b":     { vocab: 151936, d: 2560, f: 9728,  l: 36, h: 32, kv: 8,  hd: 128, qk_norm: true,  qkv_bias: false },
+      "qwen3-8b":     { vocab: 151936, d: 4096, f: 12288, l: 36, h: 32, kv: 8,  hd: 128, qk_norm: true,  qkv_bias: false },
+      "llama3.2-1b":  { vocab: 128256, d: 2048, f: 8192,  l: 16, h: 32, kv: 8,  hd: 64,  qk_norm: false, qkv_bias: false },
+      "llama3.2-3b":  { vocab: 128256, d: 3072, f: 8192,  l: 28, h: 24, kv: 8,  hd: 128, qk_norm: false, qkv_bias: false },
+      "llama3.1-8b":  { vocab: 128256, d: 4096, f: 14336, l: 32, h: 32, kv: 8,  hd: 128, qk_norm: false, qkv_bias: false }
+    };
+
+    const ACTS = {
+      act1:  { badge: "ACT 1", preset: "tiny", dp: 1, fsdp: 1, pp: 1, cp: 1, tp: 1, sp: false, seq: 128, gbs: 16, mbs: 4, desc: "Baseline on 1 simulated device: zero communication collectives, full model & optimizer state on device 0." },
+      act2:  { badge: "ACT 2", preset: "tiny", dp: 1, fsdp: 8, pp: 1, cp: 1, tp: 1, sp: false, seq: 128, gbs: 16, mbs: 2, desc: "FSDP (ZeRO-3) across 8 devices: every weight & AdamW moment shrinks 8x via a single rule: \"embed\": \"fsdp\"." },
+      act3a: { badge: "ACT 3a", preset: "tiny", dp: 1, fsdp: 1, pp: 1, cp: 1, tp: 4, sp: false, seq: 128, gbs: 16, mbs: 4, desc: "Tensor Parallelism (TP=4): attention heads & MLP columns split 4 ways; XLA inserts all-reduce(tp) after wo and w_down." },
+      act3b: { badge: "ACT 3b", preset: "tiny", dp: 1, fsdp: 1, pp: 1, cp: 1, tp: 4, sp: true,  seq: 128, gbs: 16, mbs: 4, desc: "TP=4 + Sequence Parallelism (--sp): residual stream & RMSNorm sharded over tp; all-reduce turns into all-gather + reduce-scatter!" },
+      act4:  { badge: "ACT 4", preset: "tiny", dp: 1, fsdp: 1, pp: 1, cp: 2, tp: 2, sp: false, seq: 128, gbs: 16, mbs: 4, desc: "TP=2 × CP=2: sequence split across cp ranks; XLA automatically inserts all-gather(cp) on K/V tensors before attention." },
+      act5:  { badge: "ACT 5", preset: "tiny", dp: 2, fsdp: 1, pp: 2, cp: 2, tp: 2, sp: false, seq: 128, gbs: 16, mbs: 4, desc: "Full 4D Parallelism (DP=2 × PP=2 × CP=2 × TP=2) on 16 simulated devices: all 4 axes active simultaneously." },
+      act7:  { badge: "ACT 7", preset: "qwen3-0.6b", dp: 1, fsdp: 1, pp: 1, cp: 1, tp: 4, sp: false, seq: 256, gbs: 16, mbs: 4, desc: "Pretrained Qwen3-0.6B (explicit head_dim=128, QK-Norm) streamed directly from safetensors onto a 4-way TP mesh." }
+    };
+
+    const state = {
+      preset: "tiny",
+      dp: 2,
+      fsdp: 1,
+      pp: 2,
+      cp: 2,
+      tp: 2,
+      sp: false,
+      seqLen: 128,
+      gbs: 16,
+      mbs: 4,
+      ppMicro: 4,
+      selectedDevice: 0,
+      ruleEmbed: "fsdp",
+      ruleTp: "tp",
+      ruleKvSeq: "None",
+      pipeStep: -1,
+      pipeTimer: null
+    };
+
+    function countParams(m) {
+      let perLayer = m.d * m.h * m.hd + 2 * m.d * m.kv * m.hd + m.h * m.hd * m.d + 3 * m.d * m.f + 2 * m.d;
+      if (m.qk_norm) perLayer += 2 * m.hd;
+      if (m.qkv_bias) perLayer += (m.h + 2 * m.kv) * m.hd;
+      return 2 * m.vocab * m.d + m.l * perLayer + m.d;
+    }
+
+    function formatHuman(n) {
+      if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(2) + "K";
+      return String(n);
+    }
+
+    function formatBytes(bytes) {
+      const units = ["B", "KiB", "MiB", "GiB"];
+      let val = bytes;
+      for (let i = 0; i < units.length; i++) {
+        if (val < 1024 || i === units.length - 1) {
+          return (i === 0 ? Math.round(val) : val.toFixed(2)) + " " + units[i];
+        }
+        val /= 1024;
+      }
+      return val.toFixed(2) + " GiB";
+    }
+
+    function validateState(m) {
+      const errors = [];
+      if (m.kv % state.tp !== 0) errors.push(`num_key_value_heads (${m.kv}) % tp (${state.tp}) != 0`);
+      if (m.f % state.tp !== 0) errors.push(`intermediate_size (${m.f}) % tp (${state.tp}) != 0`);
+      if (m.vocab % state.tp !== 0) errors.push(`vocab_size (${m.vocab}) % tp (${state.tp}) != 0`);
+      if (m.d % state.fsdp !== 0) errors.push(`hidden_size (${m.d}) % fsdp (${state.fsdp}) != 0`);
+      if (m.l % state.pp !== 0) errors.push(`num_hidden_layers (${m.l}) % pp (${state.pp}) != 0`);
+      const seqShard = state.cp * (state.sp ? state.tp : 1);
+      if (state.seqLen % seqShard !== 0) errors.push(`seq_len (${state.seqLen}) % ${seqShard} != 0`);
+      const dpTotal = state.dp * state.fsdp;
+      if (state.gbs % (state.mbs * dpTotal) !== 0) {
+        errors.push(`global_batch_size (${state.gbs}) % (mbs*dp*fsdp=${state.mbs * dpTotal}) != 0`);
+      }
+      return errors;
+    }
+
+    function describeMesh() {
+      const parts = [];
+      for (const [k, label] of [["dp", "DP"], ["fsdp", "FSDP"], ["pp", "PP"], ["cp", "CP"], ["tp", "TP"]]) {
+        if (state[k] > 1) {
+          parts.push(k === "tp" && state.sp ? `TP=${state[k]}(+SP)` : `${label}=${state[k]}`);
+        }
+      }
+      return parts.length ? parts.join(" x ") : "single device";
+    }
+
+    function getParamRows(m) {
+      const embedAxis = state.ruleEmbed === "fsdp" ? "fsdp" : null;
+      const tpAxis = state.ruleTp === "tp" ? "tp" : null;
+      const dimSize = (axis) => (axis ? state[axis] : 1);
+
+      const defs = [
+        { name: ".embed", axes: ["vocab", "embed"], shape: [m.vocab, m.d], spec: [tpAxis, embedAxis] },
+        { name: ".blocks.attn_norm", axes: ["layers", null], shape: [m.l, m.d], spec: ["pp", null] },
+        { name: ".blocks.wq", axes: ["layers", "embed", "heads", null], shape: [m.l, m.d, m.h, m.hd], spec: ["pp", embedAxis, tpAxis, null] },
+        { name: ".blocks.wk", axes: ["layers", "embed", "kv_heads", null], shape: [m.l, m.d, m.kv, m.hd], spec: ["pp", embedAxis, tpAxis, null] },
+        { name: ".blocks.wv", axes: ["layers", "embed", "kv_heads", null], shape: [m.l, m.d, m.kv, m.hd], spec: ["pp", embedAxis, tpAxis, null] },
+        { name: ".blocks.wo", axes: ["layers", "heads", null, "embed"], shape: [m.l, m.h, m.hd, m.d], spec: ["pp", tpAxis, null, embedAxis] },
+        { name: ".blocks.mlp_norm", axes: ["layers", null], shape: [m.l, m.d], spec: ["pp", null] },
+        { name: ".blocks.w_gate", axes: ["layers", "embed", "mlp"], shape: [m.l, m.d, m.f], spec: ["pp", embedAxis, tpAxis] },
+        { name: ".blocks.w_up", axes: ["layers", "embed", "mlp"], shape: [m.l, m.d, m.f], spec: ["pp", embedAxis, tpAxis] },
+        { name: ".blocks.w_down", axes: ["layers", "mlp", "embed"], shape: [m.l, m.f, m.d], spec: ["pp", tpAxis, embedAxis] },
+      ];
+      if (m.qk_norm) {
+        defs.push({ name: ".blocks.q_norm", axes: ["layers", null], shape: [m.l, m.hd], spec: ["pp", null] });
+        defs.push({ name: ".blocks.k_norm", axes: ["layers", null], shape: [m.l, m.hd], spec: ["pp", null] });
+      }
+      if (m.qkv_bias) {
+        defs.push({ name: ".blocks.bq", axes: ["layers", "heads", null], shape: [m.l, m.h, m.hd], spec: ["pp", tpAxis, null] });
+        defs.push({ name: ".blocks.bk", axes: ["layers", "kv_heads", null], shape: [m.l, m.kv, m.hd], spec: ["pp", tpAxis, null] });
+        defs.push({ name: ".blocks.bv", axes: ["layers", "kv_heads", null], shape: [m.l, m.kv, m.hd], spec: ["pp", tpAxis, null] });
+      }
+      defs.push({ name: ".final_norm", axes: [null], shape: [m.d], spec: [null] });
+      defs.push({ name: ".lm_head", axes: ["embed", "vocab"], shape: [m.d, m.vocab], spec: [embedAxis, tpAxis] });
+
+      return defs.map((item) => {
+        const shardShape = item.shape.map((s, idx) => Math.max(1, Math.ceil(s / dimSize(item.spec[idx]))));
+        const elems = shardShape.reduce((a, b) => a * b, 1);
+        const bytes = elems * 4;
+        const specStr = "P(" + item.spec.map((x) => (x ? `'${x}'` : "None")).join(", ") + ")";
+        return { ...item, shardShape, bytes, specStr };
+      });
+    }
+
+    function computeCollectives(m) {
+      const list = [];
+      const b = state.mbs;
+      const t = state.seqLen;
+      const d = m.d;
+      const kvBytes = 2 * b * t * Math.max(1, m.kv / state.tp) * m.hd * 4;
+      const actBytes = b * t * d * 4;
+      const paramBytesTotal = countParams(m) * 4;
+
+      if (state.tp > 1 && state.ruleTp === "tp") {
+        if (state.sp) {
+          list.push({
+            op: "all-gather",
+            axis: "tp",
+            count: 9,
+            bytes: actBytes * 4,
+            reason: "Sequence Parallel (--sp): gather sequence-sharded activations over tp before QKV, MLP & lm_head"
+          });
+          list.push({
+            op: "reduce-scatter",
+            axis: "tp",
+            count: 6,
+            bytes: (actBytes / state.tp) * 4,
+            reason: "Sequence Parallel (--sp): reduce & scatter wo / w_down outputs back onto ('cp', 'tp') residual"
+          });
+        } else {
+          list.push({
+            op: "all-reduce",
+            axis: "tp",
+            count: 17,
+            bytes: actBytes * 6,
+            reason: "Tensor Parallel: sum partial dot-products after row-parallel wo, w_down, and vocab projections"
+          });
+          list.push({
+            op: "all-gather",
+            axis: "tp",
+            count: 2,
+            bytes: b * t * 4 * 2,
+            reason: "Vocab-sharded cross-entropy & logit gathering across tp ranks"
+          });
+        }
+      }
+
+      if (state.cp > 1 && state.ruleKvSeq === "None") {
+        list.push({
+          op: "all-gather",
+          axis: "cp",
+          count: 4,
+          bytes: kvBytes * 2,
+          reason: "Context Parallel: gather K and V across cp ranks so every query slice attends to full context"
+        });
+        list.push({
+          op: "all-reduce",
+          axis: "cp",
+          count: 5,
+          bytes: (paramBytesTotal / (state.pp * state.tp * state.fsdp)),
+          reason: "Context Parallel backward: reduce K/V and layer norm weight gradients across sequence shards"
+        });
+      }
+
+      if (state.fsdp > 1 && state.ruleEmbed === "fsdp") {
+        list.push({
+          op: "all-gather",
+          axis: "fsdp",
+          count: 21,
+          bytes: (paramBytesTotal / (state.pp * state.tp)) * 2,
+          reason: "FSDP (ZeRO-3): unshard weight slices along 'embed' before forward & rematerialised backward matmuls"
+        });
+        list.push({
+          op: "reduce-scatter",
+          axis: "fsdp",
+          count: 10,
+          bytes: paramBytesTotal / (state.pp * state.tp * state.fsdp),
+          reason: "FSDP (ZeRO-3): reduce and scatter weight gradients into each rank's 1/fsdp shard"
+        });
+      }
+
+      if (state.dp > 1) {
+        list.push({
+          op: "all-reduce",
+          axis: "dp",
+          count: state.pp > 1 ? 4 : 12,
+          bytes: paramBytesTotal / (state.pp * state.tp * state.fsdp),
+          reason: "Data Parallel: average parameter gradients across dp replicas once per optimizer step"
+        });
+      }
+
+      if (state.pp > 1) {
+        list.push({
+          op: "collective-permute",
+          axis: "pp",
+          count: 5,
+          bytes: (actBytes / state.cp) * 2,
+          reason: "Pipeline Parallel: jnp.roll(state, shift=1, axis=0) sends microbatch activations Stage i -> Stage i+1"
+        });
+        list.push({
+          op: "all-reduce",
+          axis: "pp",
+          count: 4,
+          bytes: m.d * 4 * 8,
+          reason: "Cross-stage global gradient norm & scalar loss reduction across pipeline stages"
+        });
+      }
+
+      return list;
+    }
+
+    function renderAll() {
+      const m = MODEL_PRESETS[state.preset];
+      const worldSize = state.dp * state.fsdp * state.pp * state.cp * state.tp;
+      const totalParams = countParams(m);
+      const errors = validateState(m);
+
+      document.getElementById("dpVal").textContent = state.dp;
+      document.getElementById("fsdpVal").textContent = state.fsdp;
+      document.getElementById("ppVal").textContent = state.pp;
+      document.getElementById("cpVal").textContent = state.cp;
+      document.getElementById("tpVal").textContent = state.tp;
+      document.getElementById("paramCountBadge").textContent = formatHuman(totalParams) + " params";
+      document.getElementById("worldSizeBadge").textContent = `${worldSize} device${worldSize > 1 ? "s" : ""}`;
+      document.getElementById("meshDescribe").textContent = describeMesh();
+      document.getElementById("ruleResSeqLabel").textContent = state.sp && state.tp > 1 ? '(\"cp\", \"tp\")' : '\"cp\"';
+
+      const banner = document.getElementById("validationBanner");
+      if (errors.length === 0) {
+        banner.className = "text-xs px-2.5 py-1 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 mono";
+        banner.textContent = "✓ Valid Mesh & Model Shapes";
+      } else {
+        banner.className = "text-xs px-2.5 py-1 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 mono";
+        banner.textContent = "⚠ " + errors[0];
+      }
+
+      // Parameter table & memory KPIs
+      const rows = getParamRows(m);
+      const totalParamBytes = rows.reduce((acc, r) => acc + r.bytes, 0);
+      const totalOptBytes = totalParamBytes * 2;
+      document.getElementById("kpiParamMem").textContent = formatBytes(totalParamBytes);
+      document.getElementById("kpiOptMem").textContent = "+ AdamW: " + formatBytes(totalParamBytes + totalOptBytes);
+
+      const dpTotal = state.dp * state.fsdp;
+      const accum = Math.max(1, Math.floor(state.gbs / (state.mbs * dpTotal)));
+      document.getElementById("kpiTokensStep").textContent = formatHuman(state.gbs * state.seqLen);
+      document.getElementById("kpiGradAccum").textContent = `Grad accum: ${accum}x | DP×FSDP: ${dpTotal}`;
+
+      const ppM = state.pp > 1 ? state.ppMicro : 1;
+      const bubble = state.pp > 1 ? ((state.pp - 1) / (ppM + state.pp - 1)) * 100 : 0;
+      document.getElementById("kpiBubble").textContent = bubble.toFixed(0) + "%";
+      document.getElementById("kpiMicrobatches").textContent = `PP stages: ${state.pp} | Microbatches: ${ppM}`;
+
+      const colls = computeCollectives(m);
+      const totalOps = colls.reduce((a, c) => a + c.count, 0);
+      const activeAxes = ["dp", "pp", "fsdp", "cp", "tp"].filter((a) => state[a] > 1);
+      document.getElementById("kpiCollectives").textContent = `${totalOps} static ops`;
+      document.getElementById("kpiActiveAxes").textContent = activeAxes.length ? `Axes: ${activeAxes.join(", ")}` : "Single device (none)";
+
+      // CLI Command
+      const flags = [`--cpu_devices ${worldSize}`];
+      if (state.preset !== "tiny") flags.push(`--preset ${state.preset}`);
+      for (const ax of ["dp", "fsdp", "pp", "cp", "tp"]) {
+        if (state[ax] > 1) flags.push(`--${ax} ${state[ax]}`);
+      }
+      if (state.sp) flags.push("--sp");
+      flags.push(`--seq_len ${state.seqLen} --global_batch_size ${state.gbs} --micro_batch_size ${state.mbs}`);
+      flags.push("--show_sharding --show_collectives");
+      document.getElementById("cliOutput").textContent = `jaxotron-train ${flags.join(" ")}`;
+
+      renderDeviceGrid(m, worldSize);
+      renderShardingTable(rows, totalParamBytes, totalOptBytes);
+      renderCollectivesTable(colls);
+      renderPipelineTimeline();
+      renderScorecard(m);
+    }
+
+    function renderDeviceGrid(m, worldSize) {
+      if (state.selectedDevice >= worldSize) state.selectedDevice = 0;
+      const grid = document.getElementById("deviceGrid");
+      grid.innerHTML = "";
+
+      const dims = [state.dp, state.pp, state.fsdp, state.cp, state.tp];
+      const unravel = (idx) => {
+        const coords = [];
+        let rem = idx;
+        for (let i = dims.length - 1; i >= 0; i--) {
+          coords[i] = rem % dims[i];
+          rem = Math.floor(rem / dims[i]);
+        }
+        return { dp: coords[0], pp: coords[1], fsdp: coords[2], cp: coords[3], tp: coords[4] };
+      };
+
+      const maxShown = Math.min(worldSize, 32);
+      for (let id = 0; id < maxShown; id++) {
+        const c = unravel(id);
+        const isSel = id === state.selectedDevice;
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = `stage-cell text-left p-2.5 rounded-lg border transition ${
+          isSel
+            ? "bg-indigo-950/90 border-indigo-400 ring-1 ring-indigo-400"
+            : "bg-slate-900/90 border-slate-800 hover:border-slate-600"
+        }`;
+        const layersPerStage = Math.max(1, Math.floor(m.l / state.pp));
+        const lStart = c.pp * layersPerStage;
+        const lEnd = lStart + layersPerStage - 1;
+        card.innerHTML = `
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-bold text-white mono">cpu:${id}</span>
+            <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 mono">Stage ${c.pp} (L${lStart}–${lEnd})</span>
+          </div>
+          <div class="text-[11px] text-slate-400 mono">
+            dp:${c.dp} fsdp:${c.fsdp} cp:${c.cp} tp:${c.tp}
+          </div>
+        `;
+        card.addEventListener("click", () => {
+          state.selectedDevice = id;
+          renderDeviceGrid(m, worldSize);
+        });
+        grid.appendChild(card);
+      }
+
+      const sel = unravel(state.selectedDevice);
+      const layersPerStage = Math.max(1, Math.floor(m.l / state.pp));
+      const headsPerTp = Math.max(1, Math.floor(m.h / state.tp));
+      const seqShard = state.cp * (state.sp ? state.tp : 1);
+      const tokPerShard = Math.max(1, Math.floor(state.seqLen / seqShard));
+      const seqIdx = state.sp ? sel.cp * state.tp + sel.tp : sel.cp;
+      const dpRank = sel.dp * state.fsdp + sel.fsdp;
+      const batchRows = Math.max(1, Math.floor(state.gbs / (state.dp * state.fsdp)));
+
+      document.getElementById("deviceInspector").innerHTML = `
+        <div>
+          <div class="text-[10px] text-slate-400 uppercase">Selected Device</div>
+          <div class="font-bold text-indigo-300 mono mt-0.5">cpu:${state.selectedDevice} (${sel.dp},${sel.pp},${sel.fsdp},${sel.cp},${sel.tp})</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-slate-400 uppercase">Pipeline Stage (PP)</div>
+          <div class="font-semibold text-amber-300 mono mt-0.5">Stage ${sel.pp}: Layers ${sel.pp * layersPerStage}..${(sel.pp + 1) * layersPerStage - 1}</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-slate-400 uppercase">Tensor Slice (TP)</div>
+          <div class="font-semibold text-purple-300 mono mt-0.5">Heads ${sel.tp * headsPerTp}..${(sel.tp + 1) * headsPerTp - 1} (1/${state.tp})</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-slate-400 uppercase">Residual Seq (CP${state.sp ? "+SP" : ""})</div>
+          <div class="font-semibold text-pink-300 mono mt-0.5">Tokens ${seqIdx * tokPerShard}..${(seqIdx + 1) * tokPerShard - 1}</div>
+        </div>
+        <div>
+          <div class="text-[10px] text-slate-400 uppercase">Batch &amp; FSDP Shard</div>
+          <div class="font-semibold text-emerald-300 mono mt-0.5">Rows ${dpRank * batchRows}..${(dpRank + 1) * batchRows - 1} | W-slice ${sel.fsdp + 1}/${state.fsdp}</div>
+        </div>
+      `;
+    }
+
+    function renderShardingTable(rows, totalParamBytes, totalOptBytes) {
+      const tbody = document.getElementById("shardingTableBody");
+      tbody.innerHTML = rows
+        .map(
+          (r) => `
+        <tr class="hover:bg-slate-900/60">
+          <td class="py-1.5 px-2.5 text-indigo-300 font-medium">${r.name}</td>
+          <td class="py-1.5 px-2.5 text-slate-400">(${r.axes.map((a) => (a ? `'${a}'` : "None")).join(", ")})</td>
+          <td class="py-1.5 px-2.5 text-slate-200">[${r.shape.join(", ")}]</td>
+          <td class="py-1.5 px-2.5 text-amber-300">${r.specStr}</td>
+          <td class="py-1.5 px-2.5 text-right text-slate-300">[${r.shardShape.join(", ")}]</td>
+          <td class="py-1.5 px-2.5 text-right text-emerald-300 font-medium">${(r.bytes / (1024 * 1024)).toFixed(2)}</td>
+        </tr>
+      `
+        )
+        .join("");
+
+      tbody.innerHTML += `
+        <tr class="bg-slate-900/90 font-semibold text-white border-t border-slate-700">
+          <td class="py-2 px-2.5" colspan="5">TOTAL (params only per device)</td>
+          <td class="py-2 px-2.5 text-right text-emerald-300">${(totalParamBytes / (1024 * 1024)).toFixed(2)} MB</td>
+        </tr>
+        <tr class="bg-slate-900/90 font-semibold text-indigo-200">
+          <td class="py-2 px-2.5" colspan="5">TOTAL (params + sharded AdamW state per device)</td>
+          <td class="py-2 px-2.5 text-right text-indigo-300">${((totalParamBytes + totalOptBytes) / (1024 * 1024)).toFixed(2)} MB</td>
+        </tr>
+      `;
+    }
+
+    function renderCollectivesTable(colls) {
+      const tbody = document.getElementById("collectivesTableBody");
+      if (colls.length === 0) {
+        tbody.innerHTML = `
+          <tr>
+            <td colspan="5" class="py-4 px-3 text-center text-slate-400">
+              No collectives: this layout needs no communication (single device or pure replication).
+            </td>
+          </tr>
+        `;
+        return;
+      }
+      tbody.innerHTML = colls
+        .map(
+          (c) => `
+        <tr class="hover:bg-slate-900/60">
+          <td class="py-2 px-3 font-semibold text-purple-300">${c.op}</td>
+          <td class="py-2 px-3"><span class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-amber-300">${c.axis}</span></td>
+          <td class="py-2 px-3 text-right text-white font-semibold">${c.count}</td>
+          <td class="py-2 px-3 text-right text-emerald-300">${formatBytes(c.bytes)}</td>
+          <td class="py-2 px-3 text-slate-300 font-sans text-xs">${c.reason}</td>
+        </tr>
+      `
+        )
+        .join("");
+    }
+
+    function renderPipelineTimeline() {
+      const S = Math.max(1, state.pp);
+      const M = state.ppMicro;
+      const fwdSlots = M + S - 1;
+      const totalSlots = fwdSlots * 2;
+      const bubbleFrac = S > 1 ? ((S - 1) / (M + S - 1)) * 100 : 0;
+
+      document.getElementById("pipelineInfoBar").innerHTML = `
+        <span>Stages (S): <strong class="text-amber-300">${S}</strong></span>
+        <span>Microbatches (M): <strong class="text-sky-300">${M}</strong></span>
+        <span>Fwd/Bwd Ticks: <strong class="text-white">${fwdSlots} + ${fwdSlots} = ${totalSlots}</strong></span>
+        <span>Bubble Fraction (S-1)/(M+S-1): <strong class="text-rose-300">${bubbleFrac.toFixed(1)}% idle</strong></span>
+      `;
+
+      let html = `<table class="w-full border-collapse text-xs mono"><thead><tr class="text-slate-400 border-b border-slate-800"><th class="py-2 px-2 text-left">Stage</th>`;
+      for (let t = 0; t < totalSlots; t++) {
+        const activeCol = state.pipeStep === t ? "bg-amber-500/20 text-amber-300" : "";
+        html += `<th class="py-1.5 px-2 text-center ${activeCol}">t=${t}</th>`;
+      }
+      html += `</tr></thead><tbody class="divide-y divide-slate-800/60">`;
+
+      for (let s = 0; s < S; s++) {
+        html += `<tr><td class="py-2.5 px-2 font-semibold text-amber-300 whitespace-nowrap">Stage ${s}</td>`;
+        for (let t = 0; t < totalSlots; t++) {
+          const highlight = state.pipeStep === t ? "ring-2 ring-amber-400" : "";
+          if (t < fwdSlots) {
+            const mb = t - s;
+            if (mb >= 0 && mb < M) {
+              html += `<td class="p-1 text-center"><div class="py-1.5 px-2 rounded bg-sky-600/30 border border-sky-500/50 text-sky-200 font-semibold ${highlight}">F${mb}</div></td>`;
+            } else {
+              html += `<td class="p-1 text-center"><div class="py-1.5 px-2 rounded bg-slate-900/80 border border-slate-800 text-slate-600 ${highlight}">bubble</div></td>`;
+            }
+          } else {
+            const bt = t - fwdSlots;
+            const revStage = S - 1 - s;
+            const mb = bt - revStage;
+            if (mb >= 0 && mb < M) {
+              html += `<td class="p-1 text-center"><div class="py-1.5 px-2 rounded bg-purple-600/30 border border-purple-500/50 text-purple-200 font-semibold ${highlight}">B${mb}</div></td>`;
+            } else {
+              html += `<td class="p-1 text-center"><div class="py-1.5 px-2 rounded bg-slate-900/80 border border-slate-800 text-slate-600 ${highlight}">bubble</div></td>`;
+            }
+          }
+        }
+        html += `</tr>`;
+      }
+      html += `</tbody></table>`;
+      document.getElementById("pipelineTimeline").innerHTML = html;
+    }
+
+    function renderScorecard(m) {
+      const totalBytes = countParams(m) * 4;
+      const strategies = [
+        { label: "1-device baseline", dp: 1, fsdp: 1, pp: 1, cp: 1, tp: 1, sp: false, diff: "0.00e+00", colls: "none" },
+        { label: "DP = 4",            dp: 4, fsdp: 1, pp: 1, cp: 1, tp: 1, sp: false, diff: "1.19e-07", colls: "all-reduce(dp)x12" },
+        { label: "FSDP = 4 (ZeRO-3)", dp: 1, fsdp: 4, pp: 1, cp: 1, tp: 1, sp: false, diff: "2.38e-07", colls: "all-gather(fsdp)x21, reduce-scatter(fsdp)x10" },
+        { label: "TP = 4",            dp: 1, fsdp: 1, pp: 1, cp: 1, tp: 4, sp: false, diff: "2.38e-07", colls: "all-reduce(tp)x17, all-gather(tp)x2" },
+        { label: "TP = 4 + SP",       dp: 1, fsdp: 1, pp: 1, cp: 1, tp: 4, sp: true,  diff: "2.38e-07", colls: "all-gather(tp)x9, reduce-scatter(tp)x6" },
+        { label: "CP = 4 (seq split)",dp: 1, fsdp: 1, pp: 1, cp: 4, tp: 1, sp: false, diff: "1.79e-07", colls: "all-reduce(cp)x14, all-gather(cp)x4" },
+        { label: "PP = 4 (GPipe)",    dp: 1, fsdp: 1, pp: 4, cp: 1, tp: 1, sp: false, diff: "1.19e-07", colls: "all-reduce(pp)x4, collective-permute(pp)x5" },
+        { label: "4D (2x2x2x2)",      dp: 2, fsdp: 1, pp: 2, cp: 2, tp: 2, sp: false, diff: "2.98e-07", colls: "all-reduce(dp/pp/cp/tp), all-gather(cp), collective-permute(pp)" }
+      ];
+
+      const tbody = document.getElementById("scorecardTableBody");
+      tbody.innerHTML = "";
+      strategies.forEach((s) => {
+        const devs = s.dp * s.fsdp * s.pp * s.cp * s.tp;
+        const divisor = s.fsdp * s.pp * s.tp;
+        const perDevBytes = totalBytes / divisor;
+        const tr = document.createElement("tr");
+        tr.className = "hover:bg-indigo-950/50 cursor-pointer transition";
+        tr.innerHTML = `
+          <td class="py-2 px-2.5 font-semibold text-indigo-300">${s.label}</td>
+          <td class="py-2 px-2.5 text-right text-white">${devs}</td>
+          <td class="py-2 px-2.5 text-right text-emerald-300">${formatBytes(perDevBytes)}</td>
+          <td class="py-2 px-2.5 text-right text-slate-200">4.86102</td>
+          <td class="py-2 px-2.5 text-right text-sky-300">${s.diff}</td>
+          <td class="py-2 px-2.5 text-amber-300">${s.colls}</td>
+        `;
+        tr.addEventListener("click", () => {
+          state.dp = s.dp;
+          state.fsdp = s.fsdp;
+          state.pp = s.pp;
+          state.cp = s.cp;
+          state.tp = s.tp;
+          state.sp = s.sp;
+          syncControlsFromState();
+          renderAll();
+        });
+        tbody.appendChild(tr);
+      });
+    }
+
+    function syncControlsFromState() {
+      document.getElementById("presetSelect").value = state.preset;
+      document.getElementById("dpRange").value = state.dp;
+      document.getElementById("fsdpRange").value = state.fsdp;
+      document.getElementById("ppRange").value = state.pp;
+      document.getElementById("cpRange").value = state.cp;
+      document.getElementById("tpRange").value = state.tp;
+      document.getElementById("spToggle").checked = state.sp;
+      document.getElementById("seqLenSelect").value = String(state.seqLen);
+      document.getElementById("gbsSelect").value = String(state.gbs);
+      document.getElementById("mbsSelect").value = String(state.mbs);
+    }
+
+    // Attach Event Listeners
+    window.addEventListener("DOMContentLoaded", () => {
+      document.getElementById("presetSelect").addEventListener("change", (e) => {
+        state.preset = e.target.value;
+        renderAll();
+      });
+      for (const ax of ["dp", "fsdp", "pp", "cp", "tp"]) {
+        document.getElementById(ax + "Range").addEventListener("input", (e) => {
+          state[ax] = parseInt(e.target.value, 10);
+          renderAll();
+        });
+      }
+      document.getElementById("spToggle").addEventListener("change", (e) => {
+        state.sp = e.target.checked;
+        renderAll();
+      });
+      document.getElementById("seqLenSelect").addEventListener("change", (e) => {
+        state.seqLen = parseInt(e.target.value, 10);
+        renderAll();
+      });
+      document.getElementById("gbsSelect").addEventListener("change", (e) => {
+        state.gbs = parseInt(e.target.value, 10);
+        renderAll();
+      });
+      document.getElementById("mbsSelect").addEventListener("change", (e) => {
+        state.mbs = parseInt(e.target.value, 10);
+        renderAll();
+      });
+
+      // Rule Editors
+      document.getElementById("ruleEmbedSelect").addEventListener("change", (e) => {
+        state.ruleEmbed = e.target.value;
+        renderAll();
+      });
+      document.getElementById("ruleTpSelect").addEventListener("change", (e) => {
+        state.ruleTp = e.target.value;
+        renderAll();
+      });
+      document.getElementById("ruleKvSeqSelect").addEventListener("change", (e) => {
+        state.ruleKvSeq = e.target.value;
+        renderAll();
+      });
+      document.getElementById("resetRulesBtn").addEventListener("click", () => {
+        state.ruleEmbed = "fsdp";
+        state.ruleTp = "tp";
+        state.ruleKvSeq = "None";
+        document.getElementById("ruleEmbedSelect").value = "fsdp";
+        document.getElementById("ruleTpSelect").value = "tp";
+        document.getElementById("ruleKvSeqSelect").value = "None";
+        renderAll();
+      });
+
+      // Pipeline controls
+      document.getElementById("ppMicroSelect").addEventListener("change", (e) => {
+        state.ppMicro = parseInt(e.target.value, 10);
+        state.pipeStep = -1;
+        renderAll();
+      });
+      document.getElementById("playPipeBtn").addEventListener("click", () => {
+        if (state.pipeTimer) {
+          clearInterval(state.pipeTimer);
+          state.pipeTimer = null;
+          document.getElementById("playPipeBtn").textContent = "▶ Animate Clock";
+          return;
+        }
+        const S = Math.max(1, state.pp);
+        const totalSlots = 2 * (state.ppMicro + S - 1);
+        state.pipeStep = 0;
+        renderPipelineTimeline();
+        document.getElementById("playPipeBtn").textContent = "⏸ Pause";
+        state.pipeTimer = setInterval(() => {
+          state.pipeStep++;
+          if (state.pipeStep >= totalSlots) {
+            clearInterval(state.pipeTimer);
+            state.pipeTimer = null;
+            state.pipeStep = -1;
+            document.getElementById("playPipeBtn").textContent = "▶ Animate Clock";
+          }
+          renderPipelineTimeline();
+        }, 550);
+      });
+      document.getElementById("resetPipeBtn").addEventListener("click", () => {
+        if (state.pipeTimer) {
+          clearInterval(state.pipeTimer);
+          state.pipeTimer = null;
+        }
+        state.pipeStep = -1;
+        document.getElementById("playPipeBtn").textContent = "▶ Animate Clock";
+        renderPipelineTimeline();
+      });
+
+      // Act buttons
+      document.querySelectorAll(".act-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const act = ACTS[btn.dataset.act];
+          if (!act) return;
+          document.querySelectorAll(".act-btn").forEach((b) => {
+            b.className = "act-btn text-xs px-2.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition";
+          });
+          btn.className = "act-btn text-xs px-2.5 py-1.5 rounded-md bg-indigo-600 text-white border border-indigo-500 transition";
+          state.preset = act.preset;
+          state.dp = act.dp;
+          state.fsdp = act.fsdp;
+          state.pp = act.pp;
+          state.cp = act.cp;
+          state.tp = act.tp;
+          state.sp = act.sp;
+          state.seqLen = act.seq;
+          state.gbs = act.gbs;
+          state.mbs = act.mbs;
+          document.getElementById("actBadge").textContent = act.badge;
+          document.getElementById("actDescription").textContent = act.desc;
+          syncControlsFromState();
+          renderAll();
+        });
+      });
+
+      // Tabs
+      document.querySelectorAll(".tab-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          document.querySelectorAll(".tab-btn").forEach((b) => {
+            b.className = "tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium bg-slate-800/80 text-slate-300 hover:bg-slate-800 transition";
+          });
+          btn.className = "tab-btn px-3.5 py-2 rounded-lg text-xs sm:text-sm font-medium bg-indigo-600 text-white transition";
+          document.querySelectorAll(".tab-panel").forEach((p) => p.classList.add("hidden"));
+          document.getElementById(btn.dataset.tab).classList.remove("hidden");
+        });
+      });
+
+      // Copy CLI button
+      document.getElementById("copyCliBtn").addEventListener("click", () => {
+        const text = document.getElementById("cliOutput").textContent;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).catch(() => {});
+        } else {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        }
+        const toast = document.getElementById("toast");
+        toast.classList.remove("opacity-0");
+        setTimeout(() => toast.classList.add("opacity-0"), 1800);
+      });
+
+      renderAll();
+    });
+  </script>
+</body>
+</html>
